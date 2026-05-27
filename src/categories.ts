@@ -5,7 +5,7 @@ export const PRODUCT_CATEGORIES = [
   'Koelkast',
   'Overig',
   'Speelgoed',
-  'Persoonlijke Hygiene',
+  'Persoonlijke Hygiëne',
   'Planten',
 ] as const;
 
