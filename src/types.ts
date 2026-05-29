@@ -1,3 +1,5 @@
+import type { ProductCategory } from './categories.js';
+
 export type SourceKind = 'official' | 'manual' | 'approved_export' | 'open_data' | 'unknown';
 
 export type LocationStatus = 'active' | 'uncertain' | 'removed' | 'needs_verification';
@@ -12,6 +14,11 @@ export interface IntakeItem {
   addressHint?: string;
   statusHint?: string;
   notes?: string;
+  categories?: ProductCategory[];
+  latitude?: number;
+  longitude?: number;
+  municipality?: string;
+  province?: string;
 }
 
 export interface LocationRecordInput {
@@ -26,6 +33,11 @@ export interface LocationRecordInput {
   sourceName: string;
   sourceLink?: string;
   observedAt: string;
+  categories: ProductCategory[];
+  latitude?: number;
+  longitude?: number;
+  municipality?: string;
+  province?: string;
 }
 
 export interface StoredLocation extends LocationRecordInput {
