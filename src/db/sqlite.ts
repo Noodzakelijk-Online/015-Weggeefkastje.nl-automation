@@ -11,6 +11,19 @@ export interface AppDb {
   listLocations(): StoredLocation[];
 }
 
+function encodeCategories(categories: StoredLocation['categories']): string {
+  return JSON.stringify(categories ?? []);
+}
+
+function decodeCategories(value: string | null | undefined): StoredLocation['categories'] {
+  if (!value) return [];
+  try {
+    return JSON.parse(value);
+  } catch {
+    return [];
+  }
+}
+
 export function openDatabase(path: string): AppDb {
   mkdirSync(dirname(path), { recursive: true });
   const db = new Database(path);
@@ -31,6 +44,11 @@ export function openDatabase(path: string): AppDb {
       source_name TEXT NOT NULL,
       source_link TEXT,
       observed_at TEXT NOT NULL,
+      categories_json TEXT NOT NULL DEFAULT '[]',
+      latitude REAL,
+      longitude REAL,
+      municipality TEXT,
+      province TEXT,
       evidence_count INTEGER NOT NULL DEFAULT 1,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -58,16 +76,24 @@ export function openDatabase(path: string): AppDb {
     );
   `);
 
+  const existingColumns = db.prepare('PRAGMA table_info(locations)').all() as Array<{ name: string }>;
+  const hasColumn = (name: string) => existingColumns.some((column) => column.name === name);
+  if (!hasColumn('categories_json')) db.exec("ALTER TABLE locations ADD COLUMN categories_json TEXT NOT NULL DEFAULT '[]'");
+  if (!hasColumn('latitude')) db.exec('ALTER TABLE locations ADD COLUMN latitude REAL');
+  if (!hasColumn('longitude')) db.exec('ALTER TABLE locations ADD COLUMN longitude REAL');
+  if (!hasColumn('municipality')) db.exec('ALTER TABLE locations ADD COLUMN municipality TEXT');
+  if (!hasColumn('province')) db.exec('ALTER TABLE locations ADD COLUMN province TEXT');
+
   const selectByKey = db.prepare('SELECT * FROM locations WHERE duplicate_key = ?');
   const insertLocation = db.prepare(`
     INSERT INTO locations (
       id, duplicate_key, title, city, address_hint, status, confidence, needs_review,
-      evidence_summary, source_kind, source_name, source_link, observed_at, evidence_count,
-      created_at, updated_at
+      evidence_summary, source_kind, source_name, source_link, observed_at, categories_json,
+      latitude, longitude, municipality, province, evidence_count, created_at, updated_at
     ) VALUES (
       @id, @duplicateKey, @title, @city, @addressHint, @status, @confidence, @needsReview,
-      @evidenceSummary, @sourceKind, @sourceName, @sourceLink, @observedAt, @evidenceCount,
-      @createdAt, @updatedAt
+      @evidenceSummary, @sourceKind, @sourceName, @sourceLink, @observedAt, @categoriesJson,
+      @latitude, @longitude, @municipality, @province, @evidenceCount, @createdAt, @updatedAt
     )
   `);
   const updateLocation = db.prepare(`
@@ -83,6 +109,11 @@ export function openDatabase(path: string): AppDb {
       source_name = @sourceName,
       source_link = @sourceLink,
       observed_at = @observedAt,
+      categories_json = @categoriesJson,
+      latitude = COALESCE(@latitude, latitude),
+      longitude = COALESCE(@longitude, longitude),
+      municipality = COALESCE(@municipality, municipality),
+      province = COALESCE(@province, province),
       evidence_count = evidence_count + 1,
       updated_at = @updatedAt
     WHERE duplicate_key = @duplicateKey
@@ -110,6 +141,11 @@ export function openDatabase(path: string): AppDb {
       sourceName: row.source_name,
       sourceLink: row.source_link ?? undefined,
       observedAt: row.observed_at,
+      categories: decodeCategories(row.categories_json),
+      latitude: row.latitude ?? undefined,
+      longitude: row.longitude ?? undefined,
+      municipality: row.municipality ?? undefined,
+      province: row.province ?? undefined,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       evidenceCount: row.evidence_count,
@@ -126,6 +162,7 @@ export function openDatabase(path: string): AppDb {
       id: existing?.id ?? randomUUID(),
       duplicateKey: key,
       ...input,
+      categoriesJson: encodeCategories(input.categories),
       confidence: nextConfidence,
       needsReview: input.needsReview ? 1 : 0,
       evidenceCount: existing ? existing.evidence_count + 1 : 1,
