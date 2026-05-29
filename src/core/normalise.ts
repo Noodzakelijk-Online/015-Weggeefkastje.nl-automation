@@ -1,4 +1,5 @@
 import type { IntakeItem, LocationRecordInput, LocationStatus } from '../types.js';
+import { inferCategoriesFromText } from '../categories.js';
 
 const REMOVED_WORDS = ['verwijderd', 'weggehaald', 'bestaat niet meer', 'is weg', 'removed'];
 const ACTIVE_WORDS = ['actief', 'staat er nog', 'beschikbaar', 'aanwezig', 'open'];
@@ -30,6 +31,8 @@ export function scoreConfidence(item: IntakeItem, status: LocationStatus): numbe
   if (item.city) score += 15;
   if (item.addressHint) score += 20;
   if (item.link) score += 10;
+  if (typeof item.latitude === 'number' && typeof item.longitude === 'number') score += 15;
+  if (item.categories && item.categories.length > 0) score += 10;
   if (item.sourceKind === 'official') score += 20;
   if (item.sourceKind === 'approved_export') score += 10;
   if (status === 'active') score += 10;
@@ -44,7 +47,8 @@ export function toLocationInput(item: IntakeItem): LocationRecordInput {
   const confidence = scoreConfidence(item, status);
   const city = cleanText(item.city);
   const addressHint = cleanText(item.addressHint);
-  const titleBase = addressHint && city ? `${addressHint}, ${city}` : city ? `Weggeefkastje in ${city}` : 'Weggeefkastje zonder bevestigde plaats';
+  const titleBase = addressHint && city ? `${addressHint}, ${city}` : city ? `Buurtkastje in ${city}` : 'Buurtkastje zonder bevestigde plaats';
+  const inferredCategories = inferCategoriesFromText(`${item.text} ${item.notes ?? ''} ${item.statusHint ?? ''}`);
 
   return {
     title: titleBase,
@@ -58,6 +62,11 @@ export function toLocationInput(item: IntakeItem): LocationRecordInput {
     sourceName: cleanText(item.sourceName) ?? 'Unknown source',
     sourceLink: cleanText(item.link),
     observedAt: item.observedAt,
+    categories: item.categories && item.categories.length > 0 ? item.categories : inferredCategories,
+    latitude: item.latitude,
+    longitude: item.longitude,
+    municipality: cleanText(item.municipality),
+    province: cleanText(item.province),
   };
 }
 
