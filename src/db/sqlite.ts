@@ -3,7 +3,10 @@ import { dirname } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import type { LocationRecordInput, StoredLocation } from '../types.js';
-import { duplicateKey } from '../core/normalise.js';
+import { duplicateKey, normaliseKey } from '../core/normalise.js';
+import { distanceInMetres } from '../core/distance.js';
+
+const COORDINATE_DUPLICATE_DISTANCE_METRES = 50;
 
 export interface AppDb {
   close(): void;
@@ -85,6 +88,8 @@ export function openDatabase(path: string): AppDb {
   if (!hasColumn('province')) db.exec('ALTER TABLE locations ADD COLUMN province TEXT');
 
   const selectByKey = db.prepare('SELECT * FROM locations WHERE duplicate_key = ?');
+  const selectById = db.prepare('SELECT * FROM locations WHERE id = ?');
+  const selectWithCoordinates = db.prepare('SELECT * FROM locations WHERE latitude IS NOT NULL AND longitude IS NOT NULL');
   const insertLocation = db.prepare(`
     INSERT INTO locations (
       id, duplicate_key, title, city, address_hint, status, confidence, needs_review,
@@ -116,7 +121,7 @@ export function openDatabase(path: string): AppDb {
       province = COALESCE(@province, province),
       evidence_count = evidence_count + 1,
       updated_at = @updatedAt
-    WHERE duplicate_key = @duplicateKey
+    WHERE id = @id
   `);
   const insertEvidence = db.prepare(`
     INSERT INTO evidence (
@@ -155,13 +160,30 @@ export function openDatabase(path: string): AppDb {
   function upsertLocation(input: LocationRecordInput): StoredLocation {
     const now = new Date().toISOString();
     const key = duplicateKey(input);
-    const existing = selectByKey.get(key) as any | undefined;
+    const keyMatch = selectByKey.get(key) as any | undefined;
+    const inputCoordinates = typeof input.latitude === 'number' && typeof input.longitude === 'number'
+      ? { latitude: input.latitude, longitude: input.longitude }
+      : undefined;
+    const coordinateMatch = !keyMatch && inputCoordinates
+      ? (selectWithCoordinates.all() as any[]).find((location) => {
+          const sameCity = !input.city || !location.city || normaliseKey(input.city) === normaliseKey(location.city);
+          return sameCity && distanceInMetres(inputCoordinates, location) <= COORDINATE_DUPLICATE_DISTANCE_METRES;
+        })
+      : undefined;
+    const existing = keyMatch ?? coordinateMatch;
 
     const nextConfidence = existing ? Math.max(existing.confidence, input.confidence) : input.confidence;
     const payload = {
       id: existing?.id ?? randomUUID(),
       duplicateKey: key,
       ...input,
+      city: input.city ?? null,
+      addressHint: input.addressHint ?? null,
+      sourceLink: input.sourceLink ?? null,
+      latitude: input.latitude ?? null,
+      longitude: input.longitude ?? null,
+      municipality: input.municipality ?? null,
+      province: input.province ?? null,
       categoriesJson: encodeCategories(input.categories),
       confidence: nextConfidence,
       needsReview: input.needsReview ? 1 : 0,
@@ -181,13 +203,13 @@ export function openDatabase(path: string): AppDb {
       locationId: payload.id,
       sourceKind: input.sourceKind,
       sourceName: input.sourceName,
-      sourceLink: input.sourceLink,
+      sourceLink: input.sourceLink ?? null,
       observedAt: input.observedAt,
       summary: input.evidenceSummary,
       createdAt: now,
     });
 
-    return mapRow(selectByKey.get(key));
+    return mapRow(selectById.get(payload.id));
   }
 
   return {
