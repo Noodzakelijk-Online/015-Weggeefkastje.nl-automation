@@ -1,6 +1,6 @@
 import type { ProductCategory } from './categories.js';
 
-export type SourceKind = 'official' | 'manual' | 'approved_export' | 'open_data' | 'unknown';
+export type SourceKind = 'official' | 'manual' | 'approved_export' | 'social_api' | 'open_data' | 'unknown';
 
 export type LocationStatus = 'active' | 'uncertain' | 'removed' | 'needs_verification';
 

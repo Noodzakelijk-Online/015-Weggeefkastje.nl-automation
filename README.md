@@ -83,6 +83,21 @@ Possible future adapters:
 - approved group export parser;
 - Nextdoor partner/export workflow if legally and technically available.
 
+## Social evidence automation
+
+The pipeline can automatically ingest only approved social evidence. It does not crawl private spaces or bypass platform controls.
+
+- **Facebook:** set a Graph API version, an access token, and the explicitly approved Page IDs in `FACEBOOK_PAGE_CONTEXTS_JSON`. Only posts from those Pages are requested.
+- **Nextdoor:** export data with the group's or platform's approval, save it as JSON Lines, and point `NEXTDOOR_APPROVED_EXPORT_PATH` at the file. There is intentionally no Nextdoor scraper.
+- **Matching:** a social mention must contain an address or coordinates to update a location automatically. Other relevant mentions are saved to `SOCIAL_REVIEW_PATH` for human review.
+- **Safety:** social-source records always remain `needsReview`; an unverified social removal report adds evidence and flags the existing record for review instead of unpublishing it immediately.
+
+Each approved-export line may contain `text` (or `message`), `observedAt`, `link`, `city`, `addressHint`, `latitude`, `longitude`, `statusHint`, `municipality`, and `province`. The intake filters for Dutch giveaway-cupboard terms and redacts email addresses and phone numbers before storing evidence.
+
+Use [data/approved-nextdoor-export.example.jsonl](data/approved-nextdoor-export.example.jsonl) as the JSON Lines schema example. It is sample data only, not a Nextdoor connection.
+
+Run `npm run serve` for the loopback-only review API. `GET /review` lists quarantined locations. `POST /review/:id` with `{ "action": "approve" }`, `{ "action": "reject" }`, or `{ "action": "mark_removed" }` records the operator decision in the local audit log; none of these actions runs automatically.
+
 ## Installation
 
 ```bash

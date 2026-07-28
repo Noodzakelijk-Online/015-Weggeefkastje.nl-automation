@@ -56,7 +56,7 @@ export function toLocationInput(item: IntakeItem): LocationRecordInput {
     addressHint,
     status,
     confidence,
-    needsReview: confidence < 70 || status !== 'active',
+    needsReview: item.sourceKind !== 'official' || confidence < 70 || status !== 'active',
     evidenceSummary: cleanText(item.text)?.slice(0, 500) ?? 'No evidence summary provided.',
     sourceKind: item.sourceKind,
     sourceName: cleanText(item.sourceName) ?? 'Unknown source',

@@ -7,11 +7,14 @@ import { duplicateKey, normaliseKey } from '../core/normalise.js';
 import { distanceInMetres } from '../core/distance.js';
 
 const COORDINATE_DUPLICATE_DISTANCE_METRES = 50;
+export type ReviewAction = 'approve' | 'reject' | 'mark_removed';
 
 export interface AppDb {
   close(): void;
   upsertLocation(input: LocationRecordInput): StoredLocation;
   listLocations(): StoredLocation[];
+  listLocationsNeedingReview(): StoredLocation[];
+  reviewLocation(id: string, action: ReviewAction): StoredLocation | undefined;
 }
 
 function encodeCategories(categories: StoredLocation['categories']): string {
@@ -77,6 +80,14 @@ export function openDatabase(path: string): AppDb {
       exported_count INTEGER NOT NULL DEFAULT 0,
       notes TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS review_decisions (
+      id TEXT PRIMARY KEY,
+      location_id TEXT NOT NULL,
+      action TEXT NOT NULL,
+      reviewed_at TEXT NOT NULL,
+      FOREIGN KEY(location_id) REFERENCES locations(id)
+    );
   `);
 
   const existingColumns = db.prepare('PRAGMA table_info(locations)').all() as Array<{ name: string }>;
@@ -131,6 +142,13 @@ export function openDatabase(path: string): AppDb {
     )
   `);
   const listLocationsStmt = db.prepare('SELECT * FROM locations ORDER BY city, title');
+  const listLocationsNeedingReviewStmt = db.prepare('SELECT * FROM locations WHERE needs_review = 1 ORDER BY updated_at DESC');
+  const updateReviewDecision = db.prepare(`
+    UPDATE locations SET status = @status, needs_review = 0, updated_at = @updatedAt WHERE id = @id
+  `);
+  const insertReviewDecision = db.prepare(`
+    INSERT INTO review_decisions (id, location_id, action, reviewed_at) VALUES (@id, @locationId, @action, @reviewedAt)
+  `);
 
   function mapRow(row: any): StoredLocation {
     return {
@@ -171,6 +189,7 @@ export function openDatabase(path: string): AppDb {
         })
       : undefined;
     const existing = keyMatch ?? coordinateMatch;
+    const unverifiedRemoval = Boolean(existing) && input.status === 'removed' && input.sourceKind !== 'official';
 
     const nextConfidence = existing ? Math.max(existing.confidence, input.confidence) : input.confidence;
     const payload = {
@@ -186,7 +205,8 @@ export function openDatabase(path: string): AppDb {
       province: input.province ?? null,
       categoriesJson: encodeCategories(input.categories),
       confidence: nextConfidence,
-      needsReview: input.needsReview ? 1 : 0,
+      status: unverifiedRemoval ? existing.status : input.status,
+      needsReview: unverifiedRemoval || input.needsReview ? 1 : 0,
       evidenceCount: existing ? existing.evidence_count + 1 : 1,
       createdAt: existing?.created_at ?? now,
       updatedAt: now,
@@ -212,9 +232,20 @@ export function openDatabase(path: string): AppDb {
     return mapRow(selectById.get(payload.id));
   }
 
+  const applyReviewDecision = db.transaction((id: string, action: ReviewAction): StoredLocation | undefined => {
+    const status = action === 'approve' ? 'active' : 'removed';
+    const reviewedAt = new Date().toISOString();
+    const result = updateReviewDecision.run({ id, status, updatedAt: reviewedAt });
+    if (result.changes !== 1) return undefined;
+    insertReviewDecision.run({ id: randomUUID(), locationId: id, action, reviewedAt });
+    return mapRow(selectById.get(id));
+  });
+
   return {
     close: () => db.close(),
     upsertLocation,
     listLocations: () => listLocationsStmt.all().map(mapRow),
+    listLocationsNeedingReview: () => listLocationsNeedingReviewStmt.all().map(mapRow),
+    reviewLocation: applyReviewDecision,
   };
 }

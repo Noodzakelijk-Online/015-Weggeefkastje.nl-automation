@@ -50,7 +50,7 @@ export function toAppExportLocation(location: StoredLocation): AppExportLocation
 }
 
 export function buildAppExport(locations: StoredLocation[]): AppExportPayload {
-  const publicLocations = locations.filter((location) => location.status !== 'removed');
+  const publicLocations = locations.filter((location) => location.status !== 'removed' && !location.needsReview);
   return {
     generatedAt: new Date().toISOString(),
     count: publicLocations.length,

@@ -72,4 +72,48 @@ describe('coordinate deduplication', () => {
       db.close();
     }
   });
+
+  it('flags an unverified removal report for review without unpublishing an active location', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'weggeefkastje-test-'));
+    temporaryDirectories.push(directory);
+    const db = openDatabase(join(directory, 'test.sqlite'));
+
+    try {
+      db.upsertLocation(input({ addressHint: 'Voorbeeldstraat 1', sourceKind: 'official' }));
+      const updated = db.upsertLocation(input({
+        addressHint: 'Voorbeeldstraat 1',
+        sourceKind: 'approved_export',
+        sourceName: 'approved-nextdoor-export',
+        status: 'removed',
+        needsReview: true,
+      }));
+
+      expect(updated.status).toBe('active');
+      expect(updated.needsReview).toBe(true);
+      expect(updated.evidenceCount).toBe(2);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('requires an explicit review decision before publishing or removing a quarantined location', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'weggeefkastje-test-'));
+    temporaryDirectories.push(directory);
+    const db = openDatabase(join(directory, 'test.sqlite'));
+
+    try {
+      const pending = db.upsertLocation(input({
+        sourceKind: 'social_api',
+        addressHint: 'Voorbeeldstraat 1',
+        needsReview: true,
+      }));
+
+      expect(db.listLocationsNeedingReview()).toHaveLength(1);
+      expect(db.reviewLocation(pending.id, 'approve')).toMatchObject({ status: 'active', needsReview: false });
+      expect(db.listLocationsNeedingReview()).toHaveLength(0);
+      expect(db.reviewLocation(pending.id, 'mark_removed')).toMatchObject({ status: 'removed', needsReview: false });
+    } finally {
+      db.close();
+    }
+  });
 });
