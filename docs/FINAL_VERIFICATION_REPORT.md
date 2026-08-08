@@ -28,6 +28,7 @@ Member invitations, a frontend component-test suite, formal assistive-technology
 ## Environment blocker
 
 - `docker compose config --quiet` passed and the Docker server initially answered. `docker build` then exceeded the five-minute bound, after which even `docker image inspect` timed out. No image or container pass is claimed; rerun the existing CI image-build gate or restart Docker Desktop and repeat locally.
+- The first clean CI run passed install, audit, lint, typecheck, tests and production build. Its Docker step exposed a missing native-build toolchain for `better-sqlite3` on Node 24 Linux; the Docker build stage now installs Python, `make` and `g++` without adding them to the runtime image. The rerun result is reported in the PR handoff.
 - An isolated detached worktree was created from commit `4ef568c` and contained the expected tracked source. Its fresh `npm ci` remained active until the ten-minute host bound while multiple other Node installs/builds were running, so clean-install gates are not claimed. The identified installer was stopped and the temporary directory was removed. CI remains the authoritative clean Linux install.
 
 ## Final command evidence

@@ -13,5 +13,6 @@
 - Ran the packaged Windows production server at desktop and mobile sizes with zero console errors. The backup/restore drill exposed and fixed an asynchronous connection-close bug.
 - Docker Compose validated; the Docker Desktop daemon stopped responding during image build and remains an explicitly reported environment blocker.
 - Created a detached clean worktree from commit `4ef568c`; its fresh `npm ci` hit the ten-minute shared-host bound. Stopped the identified installer and removed the temporary directory without claiming a clean-install pass.
+- GitHub's clean Linux job passed all application gates and failed only at Docker native dependency compilation. Added Python, `make` and `g++` to the disposable Docker build stage; runtime remains slim/non-root.
 
 No provider credential was created, inferred or committed. No external post was sent.
