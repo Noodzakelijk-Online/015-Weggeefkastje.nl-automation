@@ -1,136 +1,89 @@
 # Weggeefkastje.nl Automation
 
-Automation project for collecting, normalising, enriching, deduplicating, and updating information about **weggeefkastjes across the Netherlands**.
+A local-first Dutch operator workspace for finding, checking, publishing and coordinating weggeefkastje opportunities. It combines the existing location catalog with a review-gated exchange workflow.
 
-The goal is not only to mirror the current state of `weggeefkastje.nl`, but also to detect public signals from other permitted sources where people often report new, moved, removed, or outdated giveaway cupboards.
+The system never logs into or scrapes private Facebook or Nextdoor spaces. Facebook intake uses the official Graph API for explicitly configured Pages. Nextdoor intake accepts an administrator-approved JSONL export. Every new social mention is deduplicated against the SQLite catalog and either enters human review or an ambiguity queue. Publication is always manual.
 
-## Core goal
-
-Build a reliable local-first data pipeline that can:
-
-1. collect candidate weggeefkastjes from approved sources;
-2. normalise messy source text into one structured location model;
-3. enrich locations with geocoding, municipality, province, and source evidence;
-4. deduplicate repeated reports across websites, Facebook groups, Nextdoor, search results, and manual tips;
-5. classify each kastje as `active`, `uncertain`, `removed`, or `needs_verification`;
-6. keep provenance so every decision can be traced back to its evidence;
-7. export clean data for a map, dashboard, CSV, JSON, or API.
-
-## Important compliance rule
-
-This project must **not** bypass login walls, CAPTCHAs, robots restrictions, platform access controls, private groups, or personal privacy settings.
-
-For Facebook, Nextdoor, WhatsApp, and similar platforms, the approved collection methods are:
-
-- official APIs where available and permitted;
-- public pages or public posts only where terms allow automated access;
-- group-admin-approved exports;
-- user-submitted tips;
-- manual copy/paste imports;
-- email or form submissions from volunteers.
-
-The tool may store the existence, status, and approximate location of a kastje. It should avoid storing unnecessary personal data about the person who posted it.
-
-See `docs/COMPLIANCE_AND_PRIVACY.md`.
-
-## Proposed MVP flow
+## Working flow
 
 ```text
-source adapters
-   ↓
-raw source items
-   ↓
-normalisation
-   ↓
-deduplication
-   ↓
-geocoding + enrichment
-   ↓
-confidence scoring
-   ↓
-SQLite storage
-   ↓
-exports / dashboard / API
+manual intake / approved export / Facebook Page API
+  -> contact redaction and location validation
+  -> 50 metre catalog deduplication
+  -> deterministic safety rules
+  -> human approval
+  -> reviewed message package
+  -> operator copies and posts it manually
+  -> response and pickup coordination
+  -> completion and archive
 ```
 
-## Source strategy
+## Quick start
 
-### 1. Weggeefkastje.nl adapter
+Requirements: Node.js 20 through 25, npm, and a supported compiler environment for `better-sqlite3` when no prebuilt binary is available.
 
-Primary adapter for data already published on the official website.
-
-Because the current HTML/API structure still needs to be inspected during implementation, this adapter is selector-driven through environment variables. Once the website structure is confirmed, selectors can be locked down and covered by tests.
-
-### 2. Manual/social tip adapter
-
-For Facebook, Nextdoor, WhatsApp, local neighbourhood apps, and similar channels, this repo starts with a safe manual import path:
-
-```text
-data/manual-tips.jsonl
-```
-
-Each line is one JSON object containing source text, source URL if available, city, address hint, and status hint.
-
-### 3. Future adapters
-
-Possible future adapters:
-
-- OpenStreetMap / Overpass candidate search;
-- municipal open data if available;
-- volunteer submission form;
-- email inbox parser;
-- approved Facebook Graph API integration;
-- approved group export parser;
-- Nextdoor partner/export workflow if legally and technically available.
-
-## Social evidence automation
-
-The pipeline can automatically ingest only approved social evidence. It does not crawl private spaces or bypass platform controls.
-
-- **Facebook:** set a Graph API version, an access token, and the explicitly approved Page IDs in `FACEBOOK_PAGE_CONTEXTS_JSON`. Only posts from those Pages are requested.
-- **Nextdoor:** export data with the group's or platform's approval, save it as JSON Lines, and point `NEXTDOOR_APPROVED_EXPORT_PATH` at the file. There is intentionally no Nextdoor scraper.
-- **Matching:** a social mention must contain an address or coordinates to update a location automatically. Other relevant mentions are saved to `SOCIAL_REVIEW_PATH` for human review.
-- **Safety:** social-source records always remain `needsReview`; an unverified social removal report adds evidence and flags the existing record for review instead of unpublishing it immediately.
-
-Each approved-export line may contain `text` (or `message`), `observedAt`, `link`, `city`, `addressHint`, `latitude`, `longitude`, `statusHint`, `municipality`, and `province`. The intake filters for Dutch giveaway-cupboard terms and redacts email addresses and phone numbers before storing evidence.
-
-Use [data/approved-nextdoor-export.example.jsonl](data/approved-nextdoor-export.example.jsonl) as the JSON Lines schema example. It is sample data only, not a Nextdoor connection.
-
-Run `npm run serve` for the loopback-only review API. `GET /review` lists quarantined locations. `POST /review/:id` with `{ "action": "approve" }`, `{ "action": "reject" }`, or `{ "action": "mark_removed" }` records the operator decision in the local audit log; none of these actions runs automatically.
-
-## Installation
-
-```bash
-npm install
-cp .env.example .env
+```powershell
+Copy-Item .env.example .env
+npm ci
+npm run migrate
 npm run dev
 ```
 
-## Commands
+Open `http://127.0.0.1:5173`, create the first owner account with a password of at least 12 characters, and add an intake. The API is proxied to `127.0.0.1:3000`.
 
-```bash
-npm run dev          # run the pipeline in development mode
-npm run build        # compile TypeScript
-npm run typecheck    # TypeScript validation
-npm test             # run tests once tests are added
+For the production-like single server:
+
+```powershell
+npm run build
+npm start
 ```
 
-## Data model summary
+Open `http://127.0.0.1:3000`. Run the scheduler/worker separately:
 
-Main entities:
+```powershell
+npm run worker
+```
 
-- `locations`: canonical weggeefkastje records;
-- `evidence`: each source mention, post, export row, or website entry supporting a location;
-- `runs`: audit log for every pipeline run.
+## Provider activation
 
-Every location should be traceable back to its supporting source evidence.
+- Facebook requires `FACEBOOK_GRAPH_ACCESS_TOKEN`, a pinned `FACEBOOK_GRAPH_API_VERSION`, and an allowlist in `FACEBOOK_PAGE_CONTEXTS_JSON`. The worker only reads those Page posts and validates pagination remains on `graph.facebook.com`.
+- Nextdoor requires `NEXTDOOR_APPROVED_EXPORT_PATH` to point to a JSONL file inside `APP_DATA_DIR`. There is intentionally no browser scraper.
+- Missing credentials do not break local operation. Diagnostics show providers as not configured.
+- The safety stop under operator settings prevents external intake work. No code path publishes a post.
 
-## Development stages
+The example at [data/approved-nextdoor-export.example.jsonl](data/approved-nextdoor-export.example.jsonl) defines the accepted export shape.
 
-1. **MVP ingestion**: website adapter + manual tips + SQLite storage.
-2. **Data quality**: dedupe, status inference, confidence score.
-3. **Enrichment**: geocoding, municipality/province, stale-data detection.
-4. **Review UI/API**: admin review for uncertain matches.
-5. **Automation**: scheduled runs, exports, and monitoring.
+## Windows, ngrok and HAI
 
-Full staged plan: `docs/IMPLEMENTATION_PLAN.md`.
+- Windows 11 has one-time install plus validated background start/stop scripts; see [WINDOWS_AND_NGROK.md](docs/WINDOWS_AND_NGROK.md).
+- ngrok exposure requires an initialized database and exact stable HTTPS URL; remote first-run setup is blocked by default.
+- HAI reads a private, incremental JSON feed without write-back or inherited provider authority; see [HAI_INTEGRATION.md](docs/HAI_INTEGRATION.md).
+
+## Commands
+
+| Command | Purpose |
+| --- | --- |
+| `npm run dev` | API and dashboard in watch mode |
+| `npm run build` | Compile server and production web assets |
+| `npm test` | Automated unit, API, worker and critical-path tests |
+| `npm run lint` / `npm run typecheck` | Static verification |
+| `npm run migrate` | Apply versioned SQLite migrations |
+| `npm run doctor` | Redacted config, integrity and migration checks |
+| `npm run cli -- reconcile` | Read-only integrity and foreign-key reconciliation report |
+| `npm run benchmark` | Local 500-item API latency/resource baseline |
+| `npm run windows:install` / `windows:start` / `windows:stop` | Windows 11 standalone lifecycle |
+| `npm run backup` | SQLite online backup under `data/backups` |
+| `npm run cli -- restore --from data/backups/file.sqlite --confirm` | Restore with a recovery copy and integrity check |
+| `npm run cli -- export` | Workspace privacy/audit export |
+| `npm run cli -- support-bundle` | Redacted local diagnostic bundle |
+| `npm run worker -- --once` | Drain scheduled work once |
+
+## Security and privacy
+
+Sessions use opaque HttpOnly, SameSite=Strict cookies; only token hashes are stored. State changes require CSRF headers. Workspace IDs scope all application queries. Passwords use scrypt. CSP, request-size limits and rate limiting are enabled. Exact private addresses and contact details are rejected or redacted from public message packages.
+
+Do not commit `.env`, provider credentials, production databases, exports, backups, or support bundles. See [SECURITY.md](docs/SECURITY.md), [COMPLIANCE_AND_PRIVACY.md](docs/COMPLIANCE_AND_PRIVACY.md), and the [operator runbook](docs/OPERATOR_RUNBOOK.md).
+
+## Honest scope
+
+The implemented critical path works locally without external credentials. Live Facebook acceptance still requires an approved app/token/Page access. Nextdoor remains an approved-export workflow because a general-purpose scraping or posting interface would violate the product's safety boundary. ngrok needs an operator-owned account and stable HTTPS endpoint; HAI needs its running source service and an owner-created connected source. Geocoding, email delivery, billing, file uploads and autonomous posting are not claimed as complete.

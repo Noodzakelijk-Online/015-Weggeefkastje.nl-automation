@@ -1,6 +1,16 @@
 node_modules/
 dist/
+dist-web/
+coverage/
 .env
 data/*.sqlite
+data/*.sqlite-*
 data/exports/
 data/review/
+data/backups/
+data/support/
+data/logs/
+data/runtime/
+qa/
+output/
+.playwright-cli/

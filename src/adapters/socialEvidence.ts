@@ -30,7 +30,26 @@ export interface FacebookGraphOptions {
   apiVersion: string;
   pages: FacebookPageContext[];
   maxPostsPerPage?: number;
+  maxPages?: number;
   fetchImpl?: typeof fetch;
+}
+
+export function parseFacebookPageContextsConfig(value: string): FacebookPageContext[] {
+  const parsed = JSON.parse(value) as unknown;
+  if (!Array.isArray(parsed)) throw new Error('FACEBOOK_PAGE_CONTEXTS_JSON must be a JSON array.');
+  return parsed.map((entry, index) => {
+    if (typeof entry !== 'object' || entry === null || typeof (entry as { id?: unknown }).id !== 'string') {
+      throw new Error(`Facebook page context ${index + 1} requires an id.`);
+    }
+    const row = entry as Record<string, unknown>;
+    return {
+      id: row.id as string,
+      name: asString(row.name),
+      city: asString(row.city),
+      municipality: asString(row.municipality),
+      province: asString(row.province),
+    };
+  });
 }
 
 const MENTION_TERMS = [
@@ -167,17 +186,26 @@ export function parseFacebookGraphPosts(content: string, page: FacebookPageConte
 export async function fetchFacebookPageMentions(options: FacebookGraphOptions): Promise<SocialIngestionBatch> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const maxPostsPerPage = options.maxPostsPerPage ?? 100;
+  const maxPages = options.maxPages ?? 5;
   const batches: SocialIngestionBatch[] = [];
 
   for (const page of options.pages) {
-    const endpoint = new URL(`https://graph.facebook.com/${options.apiVersion}/${encodeURIComponent(page.id)}/posts`);
+    let endpoint: URL | undefined = new URL(`https://graph.facebook.com/${options.apiVersion}/${encodeURIComponent(page.id)}/posts`);
     endpoint.searchParams.set('fields', 'id,message,created_time,permalink_url,place');
     endpoint.searchParams.set('limit', String(maxPostsPerPage));
     endpoint.searchParams.set('access_token', options.accessToken);
 
-    const response = await fetchImpl(endpoint);
-    if (!response.ok) throw new Error(`Facebook Graph request for page ${page.id} failed with ${response.status}.`);
-    batches.push(parseFacebookGraphPosts(await response.text(), page));
+    for (let pageNumber = 0; endpoint && pageNumber < maxPages; pageNumber += 1) {
+      const response = await fetchImpl(endpoint);
+      if (!response.ok) throw new Error(`Facebook Graph request for page ${page.id} failed with ${response.status}.`);
+      const body = await response.text();
+      batches.push(parseFacebookGraphPosts(body, page));
+      const parsed = JSON.parse(body) as { paging?: { next?: string } };
+      if (!parsed.paging?.next) break;
+      const next = new URL(parsed.paging.next);
+      if (next.protocol !== 'https:' || next.hostname !== 'graph.facebook.com') throw new Error('Facebook paging URL was rejected.');
+      endpoint = next;
+    }
   }
 
   return combineBatches(batches);
