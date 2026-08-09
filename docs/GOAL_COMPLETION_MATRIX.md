@@ -36,7 +36,7 @@ Status is evidence-based: **Complete** means implemented and locally verified; *
 | 029 Web security | Complete | Helmet CSP, headers, CSRF, limits and secure cookie policy. |
 | 030 Secrets/rotation | Complete | Env-only secrets, redacted diagnostics and rotation runbook. |
 | 031 One-command local dev | Complete | `npm run dev`. |
-| 032 Docker/deployment | Partial | Multi-stage image and valid loopback Compose; local daemon became unresponsive during bounded build verification. |
+| 032 Docker/deployment | Complete | Multi-stage non-root image and loopback Compose; clean CI image build passes after native build-tool fix. |
 | 033 Migrations/rollback | Complete | Versioned forward migrations plus pre-restore recovery copy. |
 | 034 CLI/doctor | Complete | Migrate, doctor, backup, restore, export, worker, support, checksum. |
 | 035 Health/readiness | Complete | `/health`, `/ready`, Docker healthcheck. |
@@ -93,10 +93,10 @@ Status is evidence-based: **Complete** means implemented and locally verified; *
 | 086 Task graph | Complete | `TASK_GRAPH.md`. |
 | 087 Worklog/checkpoints | Complete | `CODEX_WORKLOG.md`, `CODEX_CHECKPOINTS.md`. |
 | 088 Resume safety | Complete | Durable resume rule and current-state docs. |
-| 089 Stabilization gates | Partial | Static, automated, production build and browser gates pass; Docker daemon blocked image completion. |
+| 089 Stabilization gates | Complete | Static, automated, production build, browser and clean CI Docker gates pass. |
 | 090 No vanity work | Complete | Implemented critical-path utilities/UI only. |
 | 091 Feature definition of done | Complete | Acceptance matrix plus tests/verification. |
-| 092 Fresh-clone dry run | Partial | Exact-commit clean worktree created; fresh `npm ci` hit the ten-minute shared-host bound before code gates. |
+| 092 Fresh-clone dry run | Complete | GitHub CI clean checkout/install passes all application and Docker gates; local worktree source was also complete. |
 | 093 Manual evidence | Complete | Browser screenshots and API/CLI evidence. |
 | 094 Final no-excuses search | Complete | TODO/mock/secret/dead-action searches recorded. |
 | 095 Completion matrix | Complete | This document. |

@@ -25,11 +25,12 @@ Verification date: 2026-08-09. Branch: `agent/giant-goal-implementation`. Starti
 
 Member invitations, a frontend component-test suite, formal assistive-technology tooling, English localization, email/push delivery and upload/billing/AI features. None is represented as complete, and none blocks the local critical path.
 
-## Environment blocker
+## Host-specific limitations and resolved CI evidence
 
-- `docker compose config --quiet` passed and the Docker server initially answered. `docker build` then exceeded the five-minute bound, after which even `docker image inspect` timed out. No image or container pass is claimed; rerun the existing CI image-build gate or restart Docker Desktop and repeat locally.
-- The first clean CI run passed install, audit, lint, typecheck, tests and production build. Its Docker step exposed a missing native-build toolchain for `better-sqlite3` on Node 24 Linux; the Docker build stage now installs Python, `make` and `g++` without adding them to the runtime image. The rerun result is reported in the PR handoff.
-- An isolated detached worktree was created from commit `4ef568c` and contained the expected tracked source. Its fresh `npm ci` remained active until the ten-minute host bound while multiple other Node installs/builds were running, so clean-install gates are not claimed. The identified installer was stopped and the temporary directory was removed. CI remains the authoritative clean Linux install.
+- `docker compose config --quiet` passed locally. Docker Desktop twice exceeded the five-minute local image-build bound and became temporarily unresponsive, so a local image/container pass is not claimed.
+- The first clean CI run passed install, audit, lint, typecheck, tests and production build, then exposed a missing native-build toolchain for `better-sqlite3` on Node 24 Linux. The Docker build stage now installs Python, `make` and `g++` without adding them to the runtime image.
+- The corrected clean Linux CI run [31285122517](https://github.com/Robert-Velhorst/015-Weggeefkastje.nl-automation/actions/runs/31285122517) succeeded in 3m34s, including the Docker image build. This is the authoritative clean-install and image result.
+- An isolated local detached worktree also contained the expected tracked source, but its `npm ci` hit a ten-minute shared-Windows-host bound while multiple other Node installs ran. The identified installer was stopped and the temporary directory was removed; this local resource limitation is superseded by the green clean CI run.
 
 ## Final command evidence
 
@@ -42,4 +43,4 @@ Member invitations, a frontend component-test suite, formal assistive-technology
 - `node dist/cli.js backup` then `restore --confirm`: pass after the async backup lifecycle fix; recovery copy created and restored integrity passes.
 - Windows production browser: setup/login/dashboard at 1280px and 390px, zero console errors/warnings.
 - Staged diff check passed; the credential-shaped secret scan found no matches; no unresolved code TODO/FIXME/HACK markers were found.
-- Clean-checkout source creation passed, but its fresh install hit the host timeout described above. Final commit and PR are reported in the release handoff.
+- Clean CI checkout/install and Docker image build: pass in run `31285122517`. Final commit and PR are reported in the release handoff.
