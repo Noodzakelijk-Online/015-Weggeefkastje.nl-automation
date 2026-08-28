@@ -1,0 +1,41 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # This compose file is intentionally a loopback-only local deployment.
+      NODE_ENV: development
+      HOST: 0.0.0.0
+      PORT: 3000
+      APP_DATA_DIR: /app/data
+      DATABASE_PATH: /app/data/weggeefkastjes.sqlite
+      WEB_DIST_PATH: /app/dist-web
+      ALLOW_NETWORK_BINDING: "true"
+      COOKIE_SECURE: "false"
+    volumes:
+      - weggeefkastje_data:/app/data
+  worker:
+    build: .
+    restart: unless-stopped
+    command: ["node", "dist/worker.js"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      NODE_ENV: development
+      HOST: 127.0.0.1
+      APP_DATA_DIR: /app/data
+      DATABASE_PATH: /app/data/weggeefkastjes.sqlite
+      WEB_DIST_PATH: /app/dist-web
+    volumes:
+      - weggeefkastje_data:/app/data
+    depends_on:
+      app:
+        condition: service_healthy
+volumes:
+  weggeefkastje_data:
