@@ -9,7 +9,17 @@ import { z, ZodError } from 'zod';
 import type { AppConfig } from '../config.js';
 import { AppDatabase, type SessionContext } from '../db/appDatabase.js';
 import { createItemSchema, ITEM_STATUSES, updateItemSchema, workflowActionSchema, type WorkspaceRole } from '../domain/exchange.js';
+import {
+  caretakerUpdateSchema,
+  publicReportSchema,
+  sourceRegistrationSchema,
+  sourceUpdateSchema,
+  type ResidentLocation,
+} from '../domain/residentLocation.js';
 import { buildHaiFeed, haiRequestAuthorized } from '../integrations/haiFeed.js';
+import { buildGoogleMapsDirectionsUrl } from '../app/navigation.js';
+import { createPdokAddressVerifier, type AddressVerifier } from '../integrations/pdokAddress.js';
+import { applyCaretakerChange } from '../services/residentCatalog.js';
 
 const SESSION_COOKIE = 'wk_session';
 
@@ -86,8 +96,50 @@ const setupSchema = z.object({
 const loginSchema = z.object({ email: z.string().email(), password: z.string().min(1).max(200) });
 const copySchema = z.object({ idempotencyKey: z.string().trim().min(8).max(120) });
 const safetyStopSchema = z.object({ enabled: z.boolean() });
+const caretakerLinkSchema = z.object({ expiresInDays: z.number().int().min(1).max(365).default(180) });
+const updateRequestResolutionSchema = z.object({ status: z.enum(['resolved', 'dismissed']) });
 
-export function createApp(config: AppConfig, database: AppDatabase) {
+export interface CreateAppDependencies {
+  addressVerifier?: AddressVerifier;
+}
+
+function publicLocation(location: ResidentLocation): Record<string, unknown> {
+  return {
+    id: location.id,
+    title: location.title,
+    addressLine: location.addressLine,
+    postalCode: location.postalCode,
+    city: location.city,
+    municipality: location.municipality,
+    province: location.province,
+    latitude: location.latitude,
+    longitude: location.longitude,
+    categories: location.categories,
+    lastVerifiedAt: location.lastVerifiedAt,
+    directionsUrl: buildGoogleMapsDirectionsUrl({
+      title: location.title,
+      addressHint: location.addressLine,
+      city: location.city,
+      latitude: location.latitude,
+      longitude: location.longitude,
+    }),
+  };
+}
+
+function caretakerLocation(location: ResidentLocation): Record<string, unknown> {
+  return {
+    id: location.id,
+    title: location.title,
+    addressLine: location.addressLine,
+    postalCode: location.postalCode,
+    city: location.city,
+    status: location.status,
+    categories: location.categories,
+    lastVerifiedAt: location.lastVerifiedAt,
+  };
+}
+
+export function createApp(config: AppConfig, database: AppDatabase, dependencies: CreateAppDependencies = {}) {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', config.trustProxy ? 1 : false);
@@ -133,6 +185,22 @@ export function createApp(config: AppConfig, database: AppDatabase) {
   });
 
   const authLimiter = rateLimit({ windowMs: 15 * 60_000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false });
+  const publicLimiter = rateLimit({
+    windowMs: 60_000,
+    limit: Math.min(config.rateLimitPerMinute, 120),
+    standardHeaders: 'draft-8',
+    legacyHeaders: false,
+    message: { error: { code: 'RATE_LIMITED', message: 'Te veel verzoeken. Wacht even en probeer opnieuw.' } },
+  });
+  const publicWorkspaceId = (): string => {
+    const workspaceId = database.resolvePublicWorkspaceId(config.publicWorkspaceId);
+    if (!workspaceId) throw new ApiError(404, 'PUBLIC_LOCATOR_UNAVAILABLE', 'De bewonersvinder is nog niet beschikbaar.');
+    return workspaceId;
+  };
+  const addressVerifier = dependencies.addressVerifier ?? createPdokAddressVerifier({
+    baseUrl: config.addressVerification.baseUrl,
+    timeoutMs: config.addressVerification.timeoutMs,
+  });
   app.get('/api/setup/status', (_req, res) => ok(res, { setupRequired: !database.hasUsers(), demoMode: config.demoMode }));
   app.post('/api/setup', authLimiter, (req, res, next) => {
     try {
@@ -192,6 +260,56 @@ export function createApp(config: AppConfig, database: AppDatabase) {
     }
   });
 
+  app.get('/api/public/locations', publicLimiter, (req, res, next) => {
+    try {
+      const result = database.listPublicResidentLocations(publicWorkspaceId(), {
+        query: typeof req.query.query === 'string' ? req.query.query : undefined,
+        page: Number(req.query.page ?? 1),
+        limit: Number(req.query.limit ?? 25),
+      });
+      ok(res, { items: result.items.map(publicLocation), total: result.total, page: result.page, limit: result.limit });
+    } catch (error) { next(error); }
+  });
+  app.get('/api/public/attributions', publicLimiter, (_req, res, next) => {
+    try {
+      ok(res, database.listPublicResidentAttributions(publicWorkspaceId()));
+    } catch (error) { next(error); }
+  });
+  app.get('/api/public/locations/:id', publicLimiter, (req, res, next) => {
+    try {
+      const location = database.getPublicResidentLocation(publicWorkspaceId(), String(req.params.id));
+      if (!location) throw new ApiError(404, 'LOCATION_NOT_FOUND', 'Locatie niet gevonden.');
+      ok(res, publicLocation(location));
+    } catch (error) { next(error); }
+  });
+  app.post('/api/public/locations/:id/reports', publicLimiter, (req, res, next) => {
+    try {
+      const workspaceId = publicWorkspaceId();
+      const location = database.getPublicResidentLocation(workspaceId, String(req.params.id));
+      if (!location) throw new ApiError(404, 'LOCATION_NOT_FOUND', 'Locatie niet gevonden.');
+      const input = publicReportSchema.parse(req.body);
+      database.queueLocationUpdateRequest(workspaceId, { locationId: location.id, requestType: 'public_report', reason: input.reason }, undefined, res.locals.requestId);
+      ok(res, { received: true }, 202);
+    } catch (error) { next(error); }
+  });
+  app.get('/api/public/caretaker/:token', publicLimiter, (req, res, next) => {
+    try {
+      const location = database.getCaretakerLocation(String(req.params.token));
+      if (!location) throw new ApiError(404, 'CARETTAKER_LINK_NOT_FOUND', 'Deze beheerlink is niet beschikbaar.');
+      ok(res, caretakerLocation(location));
+    } catch (error) { next(error); }
+  });
+  app.post('/api/public/caretaker/:token', publicLimiter, async (req, res, next) => {
+    try {
+      const token = String(req.params.token);
+      if (!database.getCaretakerLocation(token)) throw new ApiError(404, 'CARETTAKER_LINK_NOT_FOUND', 'Deze beheerlink is niet beschikbaar.');
+      const input = caretakerUpdateSchema.parse(req.body);
+      const location = await applyCaretakerChange({ database, verifier: addressVerifier }, token, input);
+      if (!location) throw new ApiError(422, 'ADDRESS_NOT_VERIFIED', 'Dit adres kon niet als exact Nederlands adres worden bevestigd.');
+      ok(res, caretakerLocation(location));
+    } catch (error) { next(error); }
+  });
+
   app.use('/api', requireAuth(database));
   app.get('/api/auth/me', (_req, res) => ok(res, { session: session(res), manualPostingOnly: true, mode: config.mode }));
   app.use('/api', requireCsrf);
@@ -200,6 +318,94 @@ export function createApp(config: AppConfig, database: AppDatabase) {
     database.invalidateSession(current.sessionId, current);
     res.clearCookie(SESSION_COOKIE, { path: '/' });
     ok(res, { loggedOut: true });
+  });
+
+  app.get('/api/sources', (_req, res) => ok(res, database.listSources(session(res).workspaceId)));
+  app.post('/api/sources', requireRole('owner', 'operator'), (req, res, next) => {
+    try {
+      const current = session(res);
+      const input = sourceRegistrationSchema.parse(req.body);
+      if (database.getSourceByKey(current.workspaceId, input.key)) {
+        throw new ApiError(409, 'SOURCE_KEY_EXISTS', 'Er bestaat al een bron met deze sleutel.');
+      }
+      ok(res, database.createSource(current.workspaceId, current.userId, input, res.locals.requestId), 201);
+    } catch (error) { next(error); }
+  });
+  app.patch('/api/sources/:id', requireRole('owner', 'operator'), (req, res, next) => {
+    try {
+      const current = session(res);
+      const source = database.updateSource(current.workspaceId, current.userId, String(req.params.id), sourceUpdateSchema.parse(req.body), res.locals.requestId);
+      if (!source) throw new ApiError(404, 'SOURCE_NOT_FOUND', 'Bron niet gevonden.');
+      ok(res, source);
+    } catch (error) { next(error); }
+  });
+
+  app.get('/api/resident-locations', (req, res) => {
+    const result = database.listResidentLocations(session(res).workspaceId, {
+      query: typeof req.query.query === 'string' ? req.query.query : undefined,
+      page: Number(req.query.page ?? 1),
+      limit: Number(req.query.limit ?? 50),
+      includeReview: req.query.includeReview !== 'false',
+    });
+    ok(res, result);
+  });
+  app.get('/api/resident-locations/:id/events', (req, res, next) => {
+    try {
+      const current = session(res);
+      if (!database.getResidentLocation(current.workspaceId, String(req.params.id))) throw new ApiError(404, 'LOCATION_NOT_FOUND', 'Locatie niet gevonden.');
+      ok(res, database.listResidentLocationEvents(current.workspaceId, String(req.params.id)));
+    } catch (error) { next(error); }
+  });
+  app.post('/api/resident-locations/:id/publish', requireRole('owner', 'operator'), (req, res, next) => {
+    try {
+      const current = session(res);
+      const location = database.publishResidentLocation(current.workspaceId, current.userId, String(req.params.id), res.locals.requestId);
+      if (!location) throw new ApiError(404, 'LOCATION_NOT_FOUND', 'Locatie niet gevonden.');
+      ok(res, location);
+    } catch (error) { next(error); }
+  });
+  app.get('/api/resident-locations/:id/caretaker-links', (req, res, next) => {
+    try {
+      const current = session(res);
+      if (!database.getResidentLocation(current.workspaceId, String(req.params.id))) throw new ApiError(404, 'LOCATION_NOT_FOUND', 'Locatie niet gevonden.');
+      ok(res, database.listCaretakerLinks(current.workspaceId, String(req.params.id)));
+    } catch (error) { next(error); }
+  });
+  app.post('/api/resident-locations/:id/caretaker-links', requireRole('owner', 'operator'), (req, res, next) => {
+    try {
+      const current = session(res);
+      const input = caretakerLinkSchema.parse(req.body);
+      const link = database.createCaretakerLink(current.workspaceId, current.userId, String(req.params.id), input.expiresInDays, res.locals.requestId);
+      if (!link) throw new ApiError(404, 'LOCATION_NOT_FOUND', 'Locatie niet gevonden.');
+      const relativeUrl = `/kastje-bijwerken/${encodeURIComponent(link.token)}`;
+      const url = config.baseUrl ? new URL(relativeUrl, config.baseUrl).toString() : relativeUrl;
+      ok(res, { id: link.id, locationId: link.locationId, expiresAt: link.expiresAt, url }, 201);
+    } catch (error) { next(error); }
+  });
+  app.delete('/api/caretaker-links/:id', requireRole('owner', 'operator'), (req, res, next) => {
+    try {
+      const current = session(res);
+      if (!database.revokeCaretakerLink(current.workspaceId, current.userId, String(req.params.id), res.locals.requestId)) {
+        throw new ApiError(404, 'CARETTAKER_LINK_NOT_FOUND', 'Beheerlink niet gevonden of al ingetrokken.');
+      }
+      ok(res, { revoked: true });
+    } catch (error) { next(error); }
+  });
+  app.get('/api/location-update-requests', (req, res, next) => {
+    try {
+      const status = typeof req.query.status === 'string' ? req.query.status : 'pending';
+      if (!['pending', 'resolved', 'dismissed'].includes(status)) throw new ApiError(400, 'INVALID_STATUS', 'Ongeldige verzoekstatus.');
+      ok(res, database.listLocationUpdateRequests(session(res).workspaceId, status as 'pending' | 'resolved' | 'dismissed'));
+    } catch (error) { next(error); }
+  });
+  app.post('/api/location-update-requests/:id/resolve', requireRole('owner', 'operator'), (req, res, next) => {
+    try {
+      const current = session(res);
+      const input = updateRequestResolutionSchema.parse(req.body);
+      const updated = database.resolveLocationUpdateRequest(current.workspaceId, current.userId, String(req.params.id), input.status, res.locals.requestId);
+      if (!updated) throw new ApiError(404, 'LOCATION_UPDATE_REQUEST_NOT_FOUND', 'Openstaand wijzigingsverzoek niet gevonden.');
+      ok(res, updated);
+    } catch (error) { next(error); }
   });
 
   app.get('/api/dashboard', (_req, res) => ok(res, database.dashboard(session(res).workspaceId)));

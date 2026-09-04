@@ -12,6 +12,7 @@ export interface IntakeItem {
   link?: string;
   city?: string;
   addressHint?: string;
+  postalCode?: string;
   statusHint?: string;
   notes?: string;
   categories?: ProductCategory[];

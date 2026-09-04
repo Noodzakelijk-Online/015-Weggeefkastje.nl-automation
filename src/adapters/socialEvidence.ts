@@ -131,6 +131,7 @@ function intakeFromRow(row: Record<string, unknown>, platform: SocialPlatform, s
     link: asString(row.link ?? row.permalink_url ?? row.url),
     city: asString(row.city ?? location.city ?? defaults.city),
     addressHint: asString(row.addressHint ?? row.address ?? location.street ?? defaults.addressHint),
+    postalCode: asString(row.postalCode ?? row.postcode ?? location.postalCode ?? location.postcode)?.replace(/\s+/g, '').toUpperCase(),
     statusHint: asString(row.statusHint ?? row.status),
     notes: asString(row.notes),
     latitude: asNumber(row.latitude ?? row.lat ?? location.latitude),

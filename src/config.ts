@@ -19,13 +19,19 @@ const envSchema = z.object({
   ALLOW_NETWORK_BINDING: z.enum(['true', 'false']).default('false'),
   ALLOW_REMOTE_SETUP: z.enum(['true', 'false']).default('false'),
   APP_BASE_URL: optionalString(z.string().url()),
+  PUBLIC_WORKSPACE_ID: optionalString(z.string().uuid()),
   COOKIE_SECURE: z.enum(['true', 'false']).optional(),
   ENABLE_DEMO_MODE: z.enum(['true', 'false']).default('false'),
   WORKER_POLL_MS: z.coerce.number().int().min(250).max(60_000).default(5_000),
+  PDOK_LOCATIESERVER_BASE_URL: z.string().url().default('https://api.pdok.nl'),
+  PDOK_TIMEOUT_MS: z.coerce.number().int().min(250).max(10_000).default(5_000),
   FACEBOOK_GRAPH_ACCESS_TOKEN: optionalString(),
   FACEBOOK_GRAPH_API_VERSION: optionalString(z.string().regex(/^v\d+\.\d+$/)),
   FACEBOOK_PAGE_CONTEXTS_JSON: z.string().default('[]'),
   NEXTDOOR_APPROVED_EXPORT_PATH: optionalString(),
+  BUURTKASTJESKAART_EXPORT_PATH: optionalString(),
+  OSM_OVERPASS_URL: optionalString(z.string().url()),
+  OSM_PILOT_BBOX: optionalString(z.string().regex(/^\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*$/)),
   HAI_FEED_TOKEN: optionalString(z.string().min(32)),
   HAI_WORKSPACE_ID: optionalString(z.string().uuid()),
   HAI_PROJECT_KEY: z.string().trim().min(1).max(120).default('015-Weggeefkastje'),
@@ -44,9 +50,14 @@ export interface AppConfig {
   allowNetworkBinding: boolean;
   allowRemoteSetup: boolean;
   baseUrl?: string;
+  publicWorkspaceId?: string;
   secureCookies: boolean;
   demoMode: boolean;
   workerPollMs: number;
+  addressVerification: {
+    baseUrl: string;
+    timeoutMs: number;
+  };
   hai: {
     enabled: boolean;
     feedToken?: string;
@@ -59,6 +70,10 @@ export interface AppConfig {
     facebookApiVersion?: string;
     facebookPageContextsJson: string;
     nextdoorExportPath?: string;
+    buurtkastjeskaartExportPath?: string;
+    openStreetMapConfigured: boolean;
+    openStreetMapOverpassUrl?: string;
+    openStreetMapPilotBoundingBox?: string;
   };
 }
 
@@ -82,6 +97,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.c
   const nextdoorExportPath = parsed.NEXTDOOR_APPROVED_EXPORT_PATH
     ? resolveWithin(dataDir, isAbsolute(parsed.NEXTDOOR_APPROVED_EXPORT_PATH) ? parsed.NEXTDOOR_APPROVED_EXPORT_PATH : resolve(cwd, parsed.NEXTDOOR_APPROVED_EXPORT_PATH))
     : undefined;
+  const buurtkastjeskaartExportPath = parsed.BUURTKASTJESKAART_EXPORT_PATH
+    ? resolveWithin(dataDir, isAbsolute(parsed.BUURTKASTJESKAART_EXPORT_PATH) ? parsed.BUURTKASTJESKAART_EXPORT_PATH : resolve(cwd, parsed.BUURTKASTJESKAART_EXPORT_PATH))
+    : undefined;
   const networkHost = !['127.0.0.1', 'localhost', '::1'].includes(parsed.HOST);
   const secureCookies = parsed.COOKIE_SECURE ? parsed.COOKIE_SECURE === 'true' : parsed.NODE_ENV === 'production' && networkHost;
 
@@ -101,6 +119,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.c
   if (parsed.HAI_WORKSPACE_ID && !parsed.HAI_FEED_TOKEN) {
     throw new Error('HAI_WORKSPACE_ID requires HAI_FEED_TOKEN.');
   }
+  if (Boolean(parsed.OSM_OVERPASS_URL) !== Boolean(parsed.OSM_PILOT_BBOX)) {
+    throw new Error('OSM_OVERPASS_URL and OSM_PILOT_BBOX must be configured together.');
+  }
+  if (parsed.OSM_OVERPASS_URL && new URL(parsed.OSM_OVERPASS_URL).protocol !== 'https:') {
+    throw new Error('OSM_OVERPASS_URL must use HTTPS.');
+  }
+  const pdokUrl = new URL(parsed.PDOK_LOCATIESERVER_BASE_URL);
+  if (pdokUrl.protocol !== 'https:' || pdokUrl.hostname !== 'api.pdok.nl') {
+    throw new Error('PDOK_LOCATIESERVER_BASE_URL must use the official HTTPS api.pdok.nl host.');
+  }
 
   return {
     mode: parsed.NODE_ENV,
@@ -115,9 +143,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.c
     allowNetworkBinding: parsed.ALLOW_NETWORK_BINDING === 'true',
     allowRemoteSetup: parsed.ALLOW_REMOTE_SETUP === 'true',
     baseUrl: parsed.APP_BASE_URL,
+    publicWorkspaceId: parsed.PUBLIC_WORKSPACE_ID,
     secureCookies,
     demoMode: parsed.ENABLE_DEMO_MODE === 'true',
     workerPollMs: parsed.WORKER_POLL_MS,
+    addressVerification: {
+      baseUrl: pdokUrl.origin,
+      timeoutMs: parsed.PDOK_TIMEOUT_MS,
+    },
     hai: {
       enabled: Boolean(parsed.HAI_FEED_TOKEN),
       feedToken: parsed.HAI_FEED_TOKEN,
@@ -130,6 +163,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.c
       facebookApiVersion: parsed.FACEBOOK_GRAPH_API_VERSION,
       facebookPageContextsJson: parsed.FACEBOOK_PAGE_CONTEXTS_JSON,
       nextdoorExportPath,
+      buurtkastjeskaartExportPath,
+      openStreetMapConfigured: Boolean(parsed.OSM_OVERPASS_URL && parsed.OSM_PILOT_BBOX),
+      openStreetMapOverpassUrl: parsed.OSM_OVERPASS_URL,
+      openStreetMapPilotBoundingBox: parsed.OSM_PILOT_BBOX,
     },
   };
 }
@@ -144,10 +181,13 @@ export function publicConfig(config: AppConfig): Record<string, unknown> {
     webDistPath: config.webDistPath,
     secureCookies: config.secureCookies,
     demoMode: config.demoMode,
+    addressVerification: { provider: 'pdok' },
     haiFeedConfigured: config.hai.enabled,
+    publicWorkspaceConfigured: Boolean(config.publicWorkspaceId),
     providers: {
       facebookConfigured: config.provider.facebookConfigured,
       nextdoorExportConfigured: Boolean(config.provider.nextdoorExportPath),
+      openStreetMapConfigured: config.provider.openStreetMapConfigured,
     },
   };
 }

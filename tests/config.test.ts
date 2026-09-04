@@ -20,9 +20,21 @@ describe('configuration safety', () => {
   it('accepts blank optional provider values from the example env file', () => {
     const config = loadConfig({
       APP_BASE_URL: '', FACEBOOK_GRAPH_ACCESS_TOKEN: '', FACEBOOK_GRAPH_API_VERSION: '',
-      NEXTDOOR_APPROVED_EXPORT_PATH: '', HAI_FEED_TOKEN: '', HAI_WORKSPACE_ID: '',
+      NEXTDOOR_APPROVED_EXPORT_PATH: '', BUURTKASTJESKAART_EXPORT_PATH: '', OSM_OVERPASS_URL: '', OSM_PILOT_BBOX: '',
+      HAI_FEED_TOKEN: '', HAI_WORKSPACE_ID: '',
     }, process.cwd());
     expect(config.provider.facebookConfigured).toBe(false);
     expect(config.hai.enabled).toBe(false);
+  });
+
+  it('uses the official PDOK address verifier by default and rejects an insecure override', () => {
+    expect(loadConfig({}, process.cwd()).addressVerification.baseUrl).toBe('https://api.pdok.nl');
+    expect(() => loadConfig({ PDOK_LOCATIESERVER_BASE_URL: 'http://example.test' }, process.cwd())).toThrow(/PDOK/i);
+  });
+
+  it('requires an HTTPS OpenStreetMap pilot endpoint and matching bounded-area setting', () => {
+    expect(() => loadConfig({ OSM_OVERPASS_URL: 'https://overpass.example.test' }, process.cwd())).toThrow(/OSM/i);
+    expect(() => loadConfig({ OSM_OVERPASS_URL: 'http://overpass.example.test', OSM_PILOT_BBOX: '51.9,4.2,52.1,4.5' }, process.cwd())).toThrow(/HTTPS/i);
+    expect(loadConfig({ OSM_OVERPASS_URL: 'https://overpass.example.test', OSM_PILOT_BBOX: '51.9,4.2,52.1,4.5' }, process.cwd()).provider.openStreetMapConfigured).toBe(true);
   });
 });

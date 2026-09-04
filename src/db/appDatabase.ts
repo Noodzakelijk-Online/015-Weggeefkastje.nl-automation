@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { dirname } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { createCsrfToken, createSessionToken, hashPassword, hashSessionToken, verifyPassword } from '../auth/password.js';
@@ -14,6 +14,19 @@ import {
 } from '../domain/exchange.js';
 import { evaluateRules, hasBlockingRuleFailure, type RuleResult } from '../domain/rules.js';
 import { generateMessagePackage } from '../domain/messagePackage.js';
+import {
+  sourceRegistrationSchema,
+  type CaretakerUpdateInput,
+  type LocationUpdateRequest,
+  type ResidentCandidate,
+  type ResidentLocation,
+  type ResidentLocationEvent,
+  type SourceRegistryRecord,
+  type SourceRegistrationInput,
+  type SourceUpdateInput,
+  type VerifiedAddress,
+} from '../domain/residentLocation.js';
+import { normaliseKey } from '../core/normalise.js';
 import { migrationStatus, runMigrations } from './migrations.js';
 
 export interface SessionContext {
@@ -108,6 +121,44 @@ export interface AmbiguousSocialMentionInput {
   observedAt: string;
 }
 
+export interface ResidentLocationListRequest {
+  query?: string;
+  page?: number;
+  limit?: number;
+  includeReview?: boolean;
+}
+
+export interface ResidentLocationListResult {
+  items: ResidentLocation[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
+export interface QueueLocationUpdateRequestInput {
+  locationId?: string;
+  sourceRegistryId?: string;
+  requestType: LocationUpdateRequest['requestType'];
+  reason: string;
+  candidate?: Partial<ResidentCandidate>;
+}
+
+export interface CaretakerLink {
+  id: string;
+  locationId: string;
+  token: string;
+  expiresAt: string;
+}
+
+export interface CaretakerLinkRecord {
+  id: string;
+  locationId: string;
+  expiresAt: string;
+  createdAt: string;
+  lastUsedAt?: string;
+  revokedAt?: string;
+}
+
 function parseJson<T>(value: string | null | undefined, fallback: T): T {
   if (!value) return fallback;
   try {
@@ -144,6 +195,92 @@ function mapItem(row: any): ExchangeItem {
     updatedAt: row.updated_at,
     archivedAt: row.archived_at ?? undefined,
   };
+}
+
+function mapSource(row: any): SourceRegistryRecord {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    key: row.source_key,
+    name: row.name,
+    accessMode: row.access_mode,
+    authorizationReference: row.authorization_reference,
+    attribution: row.attribution,
+    publicationMode: row.publication_mode,
+    enabled: row.enabled === 1,
+    allowsExactAddress: row.allows_exact_address === 1,
+    lastCheckedAt: row.last_checked_at ?? undefined,
+    lastStatus: row.last_status ?? undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function mapResidentLocation(row: any): ResidentLocation {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    addressKey: row.address_key,
+    title: row.title,
+    addressLine: row.address_line,
+    postalCode: row.postal_code,
+    city: row.city,
+    municipality: row.municipality ?? undefined,
+    province: row.province ?? undefined,
+    latitude: row.latitude,
+    longitude: row.longitude,
+    status: row.status,
+    publicationStatus: row.publication_status,
+    categories: parseJson<string[]>(row.categories_json, []),
+    addressVerifiedAt: row.address_verified_at,
+    lastVerifiedAt: row.last_verified_at,
+    lastObservedAt: row.last_observed_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function mapResidentLocationEvent(row: any): ResidentLocationEvent {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    locationId: row.location_id,
+    action: row.action,
+    actorType: row.actor_type,
+    sourceRegistryId: row.source_registry_id ?? undefined,
+    requestId: row.request_id ?? undefined,
+    before: parseJson<Record<string, unknown>>(row.before_json, {}),
+    after: parseJson<Record<string, unknown>>(row.after_json, {}),
+    createdAt: row.created_at,
+  };
+}
+
+function mapLocationUpdateRequest(row: any): LocationUpdateRequest {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    locationId: row.location_id ?? undefined,
+    requestType: row.request_type,
+    status: row.status,
+    reason: row.reason,
+    candidate: parseJson<Partial<ResidentCandidate>>(row.candidate_json, {}),
+    createdAt: row.created_at,
+    resolvedAt: row.resolved_at ?? undefined,
+  };
+}
+
+function residentAddressKey(address: Pick<VerifiedAddress, 'addressLine' | 'postalCode' | 'city'>): string {
+  return [normaliseKey(address.addressLine), normaliseKey(address.postalCode), normaliseKey(address.city)].join('::');
+}
+
+function residentEvidenceHash(source: SourceRegistryRecord, candidate: ResidentCandidate): string {
+  return createHash('sha256')
+    .update([source.id, candidate.sourceRecordId ?? '', candidate.sourceLink ?? '', candidate.observedAt, candidate.evidenceSummary].join('|'))
+    .digest('hex');
+}
+
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, '\\$&');
 }
 
 function mapSession(row: any): SessionContext {
@@ -469,6 +606,415 @@ export class AppDatabase {
     return true;
   }
 
+  createSource(workspaceId: string, actorUserId: string, input: SourceRegistrationInput, requestId?: string): SourceRegistryRecord {
+    const source = sourceRegistrationSchema.parse(input);
+    const now = new Date().toISOString();
+    const id = randomUUID();
+    this.db.prepare(`
+      INSERT INTO source_registry (
+        id, workspace_id, source_key, name, access_mode, authorization_reference, attribution,
+        publication_mode, enabled, allows_exact_address, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id, workspaceId, source.key, source.name, source.accessMode, source.authorizationReference, source.attribution,
+      source.publicationMode, source.enabled ? 1 : 0, source.allowsExactAddress ? 1 : 0, now, now,
+    );
+    this.audit({ workspaceId, actorUserId, action: 'resident_source.created', resourceType: 'source_registry', resourceId: id, requestId, details: { key: source.key, publicationMode: source.publicationMode } });
+    return this.getSource(workspaceId, id)!;
+  }
+
+  listSources(workspaceId: string): SourceRegistryRecord[] {
+    return (this.db.prepare('SELECT * FROM source_registry WHERE workspace_id = ? ORDER BY name COLLATE NOCASE, id').all(workspaceId) as any[]).map(mapSource);
+  }
+
+  getSource(workspaceId: string, id: string): SourceRegistryRecord | undefined {
+    const row = this.db.prepare('SELECT * FROM source_registry WHERE workspace_id = ? AND id = ?').get(workspaceId, id) as any | undefined;
+    return row ? mapSource(row) : undefined;
+  }
+
+  getSourceByKey(workspaceId: string, key: string): SourceRegistryRecord | undefined {
+    const row = this.db.prepare('SELECT * FROM source_registry WHERE workspace_id = ? AND source_key = ?').get(workspaceId, key) as any | undefined;
+    return row ? mapSource(row) : undefined;
+  }
+
+  updateSource(workspaceId: string, actorUserId: string, id: string, updates: SourceUpdateInput, requestId?: string): SourceRegistryRecord | undefined {
+    const current = this.getSource(workspaceId, id);
+    if (!current) return undefined;
+    const next = sourceRegistrationSchema.parse({
+      key: current.key,
+      name: updates.name ?? current.name,
+      accessMode: updates.accessMode ?? current.accessMode,
+      authorizationReference: updates.authorizationReference ?? current.authorizationReference,
+      attribution: updates.attribution ?? current.attribution,
+      publicationMode: updates.publicationMode ?? current.publicationMode,
+      enabled: updates.enabled ?? current.enabled,
+      allowsExactAddress: updates.allowsExactAddress ?? current.allowsExactAddress,
+    });
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      UPDATE source_registry SET name = ?, access_mode = ?, authorization_reference = ?, attribution = ?,
+        publication_mode = ?, enabled = ?, allows_exact_address = ?, updated_at = ?
+      WHERE workspace_id = ? AND id = ?
+    `).run(
+      next.name, next.accessMode, next.authorizationReference, next.attribution,
+      next.publicationMode, next.enabled ? 1 : 0, next.allowsExactAddress ? 1 : 0, now,
+      workspaceId, id,
+    );
+    this.audit({ workspaceId, actorUserId, action: 'resident_source.updated', resourceType: 'source_registry', resourceId: id, requestId, details: { before: current.publicationMode, after: next.publicationMode } });
+    return this.getSource(workspaceId, id);
+  }
+
+  recordSourceCheck(workspaceId: string, sourceId: string, status: string): void {
+    this.db.prepare('UPDATE source_registry SET last_checked_at = ?, last_status = ?, updated_at = ? WHERE workspace_id = ? AND id = ?')
+      .run(new Date().toISOString(), status.slice(0, 120), new Date().toISOString(), workspaceId, sourceId);
+  }
+
+  upsertVerifiedResidentLocation(
+    workspaceId: string,
+    actorUserId: string | undefined,
+    source: SourceRegistryRecord,
+    candidate: ResidentCandidate,
+    verified: VerifiedAddress,
+    actorType: ResidentLocationEvent['actorType'] = 'operator',
+    requestId?: string,
+  ): ResidentLocation {
+    if (source.workspaceId !== workspaceId) throw new Error('Source does not belong to this workspace.');
+    if (!source.enabled || !source.allowsExactAddress) throw new Error('Source is not permitted to publish exact addresses.');
+    const evidenceKey = residentEvidenceHash(source, candidate);
+    const result = this.db.transaction(() => {
+      const evidence = this.db.prepare('SELECT location_id FROM resident_location_evidence WHERE workspace_id = ? AND evidence_hash = ?')
+        .get(workspaceId, evidenceKey) as { location_id: string } | undefined;
+      if (evidence) return this.getResidentLocation(workspaceId, evidence.location_id)!;
+
+      const addressKey = residentAddressKey(verified);
+      const row = this.db.prepare('SELECT * FROM resident_locations WHERE workspace_id = ? AND address_key = ?').get(workspaceId, addressKey) as any | undefined;
+      const current = row ? mapResidentLocation(row) : undefined;
+      const canPublish = source.publicationMode === 'automatic' && candidate.status === 'active';
+      const now = new Date().toISOString();
+      const id = current?.id ?? randomUUID();
+      const next = {
+        id,
+        workspaceId,
+        addressKey,
+        title: canPublish || !current ? candidate.title : current.title,
+        addressLine: canPublish || !current ? verified.addressLine : current.addressLine,
+        postalCode: canPublish || !current ? verified.postalCode : current.postalCode,
+        city: canPublish || !current ? verified.city : current.city,
+        municipality: canPublish || !current ? verified.municipality ?? null : current.municipality ?? null,
+        province: canPublish || !current ? verified.province ?? null : current.province ?? null,
+        latitude: canPublish || !current ? verified.latitude : current.latitude,
+        longitude: canPublish || !current ? verified.longitude : current.longitude,
+        status: canPublish ? 'active' : current?.status ?? candidate.status,
+        publicationStatus: canPublish ? 'published' : current?.publicationStatus ?? 'review',
+        categories: canPublish || !current ? candidate.categories : current.categories,
+        addressVerifiedAt: canPublish || !current ? verified.verifiedAt : current.addressVerifiedAt,
+        lastVerifiedAt: verified.verifiedAt,
+        lastObservedAt: current && current.lastObservedAt > candidate.observedAt ? current.lastObservedAt : candidate.observedAt,
+        createdAt: current?.createdAt ?? now,
+        updatedAt: now,
+      };
+
+      if (current) {
+        this.db.prepare(`
+          UPDATE resident_locations SET title = ?, address_line = ?, postal_code = ?, city = ?, municipality = ?, province = ?,
+            latitude = ?, longitude = ?, status = ?, publication_status = ?, categories_json = ?, address_verified_at = ?,
+            last_verified_at = ?, last_observed_at = ?, updated_at = ?
+          WHERE workspace_id = ? AND id = ?
+        `).run(
+          next.title, next.addressLine, next.postalCode, next.city, next.municipality, next.province,
+          next.latitude, next.longitude, next.status, next.publicationStatus, JSON.stringify(next.categories), next.addressVerifiedAt,
+          next.lastVerifiedAt, next.lastObservedAt, next.updatedAt, workspaceId, id,
+        );
+      } else {
+        this.db.prepare(`
+          INSERT INTO resident_locations (
+            id, workspace_id, address_key, title, address_line, postal_code, city, municipality, province, latitude, longitude,
+            status, publication_status, categories_json, address_verified_at, last_verified_at, last_observed_at, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          id, workspaceId, next.addressKey, next.title, next.addressLine, next.postalCode, next.city, next.municipality, next.province,
+          next.latitude, next.longitude, next.status, next.publicationStatus, JSON.stringify(next.categories), next.addressVerifiedAt,
+          next.lastVerifiedAt, next.lastObservedAt, next.createdAt, next.updatedAt,
+        );
+      }
+
+      this.db.prepare(`
+        INSERT INTO resident_location_evidence (
+          id, workspace_id, location_id, source_registry_id, source_record_id, source_link, summary, observed_at, evidence_hash, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        randomUUID(), workspaceId, id, source.id, candidate.sourceRecordId ?? null, candidate.sourceLink ?? null,
+        candidate.evidenceSummary, candidate.observedAt, evidenceKey, now,
+      );
+      const location = this.getResidentLocation(workspaceId, id)!;
+      const action = !current && canPublish ? 'location.published' : !current ? 'location.queued_for_review' : canPublish ? 'location.updated' : 'location.evidence_added';
+      this.recordResidentLocationEvent({
+        workspaceId,
+        locationId: id,
+        action,
+        actorType,
+        sourceRegistryId: source.id,
+        requestId,
+        before: current ? this.residentSnapshot(current) : {},
+        after: this.residentSnapshot(location),
+      });
+      this.audit({ workspaceId, actorUserId, action: `resident_${action}`, resourceType: 'resident_location', resourceId: id, requestId, details: { sourceKey: source.key, publicationStatus: location.publicationStatus } });
+      return location;
+    })();
+    return result;
+  }
+
+  findResidentLocationByEvidence(workspaceId: string, source: SourceRegistryRecord, candidate: ResidentCandidate): ResidentLocation | undefined {
+    const row = this.db.prepare('SELECT location_id FROM resident_location_evidence WHERE workspace_id = ? AND evidence_hash = ?')
+      .get(workspaceId, residentEvidenceHash(source, candidate)) as { location_id: string } | undefined;
+    return row ? this.getResidentLocation(workspaceId, row.location_id) : undefined;
+  }
+
+  getResidentLocation(workspaceId: string, id: string): ResidentLocation | undefined {
+    const row = this.db.prepare('SELECT * FROM resident_locations WHERE workspace_id = ? AND id = ?').get(workspaceId, id) as any | undefined;
+    return row ? mapResidentLocation(row) : undefined;
+  }
+
+  listResidentLocations(workspaceId: string, request: ResidentLocationListRequest = {}): ResidentLocationListResult {
+    const page = Math.max(1, request.page ?? 1);
+    const limit = Math.min(100, Math.max(1, request.limit ?? 25));
+    const clauses = ['workspace_id = ?'];
+    const parameters: unknown[] = [workspaceId];
+    if (!request.includeReview) clauses.push("publication_status = 'published'");
+    if (request.query?.trim()) {
+      const query = `%${escapeLike(request.query.trim())}%`;
+      clauses.push("(title LIKE ? ESCAPE '\\' OR address_line LIKE ? ESCAPE '\\' OR postal_code LIKE ? ESCAPE '\\' OR city LIKE ? ESCAPE '\\')");
+      parameters.push(query, query, query, query);
+    }
+    const where = clauses.join(' AND ');
+    const total = (this.db.prepare(`SELECT COUNT(*) AS count FROM resident_locations WHERE ${where}`).get(...parameters) as { count: number }).count;
+    const rows = this.db.prepare(`SELECT * FROM resident_locations WHERE ${where} ORDER BY city COLLATE NOCASE, address_line COLLATE NOCASE, id LIMIT ? OFFSET ?`)
+      .all(...parameters, limit, (page - 1) * limit) as any[];
+    return { items: rows.map(mapResidentLocation), total, page, limit };
+  }
+
+  listPublicResidentLocations(workspaceId: string, request: Omit<ResidentLocationListRequest, 'includeReview'> = {}): ResidentLocationListResult {
+    const page = Math.max(1, request.page ?? 1);
+    const limit = Math.min(100, Math.max(1, request.limit ?? 25));
+    const clauses = ["workspace_id = ?", "publication_status = 'published'", "status = 'active'"];
+    const parameters: unknown[] = [workspaceId];
+    if (request.query?.trim()) {
+      const query = `%${escapeLike(request.query.trim())}%`;
+      clauses.push("(title LIKE ? ESCAPE '\\' OR address_line LIKE ? ESCAPE '\\' OR postal_code LIKE ? ESCAPE '\\' OR city LIKE ? ESCAPE '\\')");
+      parameters.push(query, query, query, query);
+    }
+    const where = clauses.join(' AND ');
+    const total = (this.db.prepare(`SELECT COUNT(*) AS count FROM resident_locations WHERE ${where}`).get(...parameters) as { count: number }).count;
+    const rows = this.db.prepare(`SELECT * FROM resident_locations WHERE ${where} ORDER BY city COLLATE NOCASE, address_line COLLATE NOCASE, id LIMIT ? OFFSET ?`)
+      .all(...parameters, limit, (page - 1) * limit) as any[];
+    return { items: rows.map(mapResidentLocation), total, page, limit };
+  }
+
+  listPublicResidentAttributions(workspaceId: string): Array<{ name: string; attribution: string }> {
+    return this.db.prepare(`
+      SELECT DISTINCT source.name, source.attribution
+      FROM source_registry AS source
+      JOIN resident_location_evidence AS evidence ON evidence.source_registry_id = source.id
+      JOIN resident_locations AS location ON location.id = evidence.location_id
+      WHERE location.workspace_id = ? AND location.publication_status = 'published' AND location.status = 'active'
+      ORDER BY source.name COLLATE NOCASE, source.id
+    `).all(workspaceId) as Array<{ name: string; attribution: string }>;
+  }
+
+  getPublicResidentLocation(workspaceId: string, id: string): ResidentLocation | undefined {
+    const row = this.db.prepare("SELECT * FROM resident_locations WHERE workspace_id = ? AND id = ? AND publication_status = 'published' AND status = 'active'")
+      .get(workspaceId, id) as any | undefined;
+    return row ? mapResidentLocation(row) : undefined;
+  }
+
+  listResidentLocationEvents(workspaceId: string, locationId: string): ResidentLocationEvent[] {
+    return (this.db.prepare('SELECT * FROM resident_location_events WHERE workspace_id = ? AND location_id = ? ORDER BY created_at ASC, id ASC')
+      .all(workspaceId, locationId) as any[]).map(mapResidentLocationEvent);
+  }
+
+  publishResidentLocation(workspaceId: string, actorUserId: string, id: string, requestId?: string): ResidentLocation | undefined {
+    const current = this.getResidentLocation(workspaceId, id);
+    if (!current) return undefined;
+    if (current.status !== 'active') throw new Error('Only active resident locations can be published.');
+    if (current.publicationStatus === 'published') return current;
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      this.db.prepare("UPDATE resident_locations SET publication_status = 'published', updated_at = ? WHERE workspace_id = ? AND id = ?")
+        .run(now, workspaceId, id);
+      const published = this.getResidentLocation(workspaceId, id)!;
+      this.recordResidentLocationEvent({
+        workspaceId,
+        locationId: id,
+        action: 'location.published_by_operator',
+        actorType: 'operator',
+        requestId,
+        before: this.residentSnapshot(current),
+        after: this.residentSnapshot(published),
+      });
+      this.audit({ workspaceId, actorUserId, action: 'resident_location.published_by_operator', resourceType: 'resident_location', resourceId: id, requestId });
+    })();
+    return this.getResidentLocation(workspaceId, id);
+  }
+
+  queueLocationUpdateRequest(workspaceId: string, input: QueueLocationUpdateRequestInput, actorUserId?: string, requestId?: string): LocationUpdateRequest {
+    if (input.reason.trim().length < 3) throw new Error('A location update request needs a reason.');
+    if (input.locationId && !this.getResidentLocation(workspaceId, input.locationId)) throw new Error('Resident location not found.');
+    if (input.sourceRegistryId && !this.getSource(workspaceId, input.sourceRegistryId)) throw new Error('Source not found.');
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      this.db.prepare(`
+        INSERT INTO location_update_requests (
+          id, workspace_id, location_id, source_registry_id, request_type, status, reason, candidate_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+      `).run(
+        id, workspaceId, input.locationId ?? null, input.sourceRegistryId ?? null, input.requestType,
+        input.reason.trim(), JSON.stringify(input.candidate ?? {}), now,
+      );
+      if (input.locationId) {
+        this.recordResidentLocationEvent({
+          workspaceId,
+          locationId: input.locationId,
+          action: input.requestType === 'public_report' ? 'location.public_reported' : 'location.review_requested',
+          actorType: input.requestType === 'public_report' ? 'public' : 'system',
+          sourceRegistryId: input.sourceRegistryId,
+          requestId,
+          before: {},
+          after: { requestId: id },
+        });
+      }
+      this.audit({ workspaceId, actorUserId, action: `resident_request.${input.requestType}`, resourceType: 'location_update_request', resourceId: id, requestId, details: { locationId: input.locationId } });
+    })();
+    return this.getLocationUpdateRequest(workspaceId, id)!;
+  }
+
+  getLocationUpdateRequest(workspaceId: string, id: string): LocationUpdateRequest | undefined {
+    const row = this.db.prepare('SELECT * FROM location_update_requests WHERE workspace_id = ? AND id = ?').get(workspaceId, id) as any | undefined;
+    return row ? mapLocationUpdateRequest(row) : undefined;
+  }
+
+  listLocationUpdateRequests(workspaceId: string, status: LocationUpdateRequest['status'] = 'pending'): { items: LocationUpdateRequest[]; total: number } {
+    const rows = this.db.prepare('SELECT * FROM location_update_requests WHERE workspace_id = ? AND status = ? ORDER BY created_at DESC, id DESC LIMIT 100')
+      .all(workspaceId, status) as any[];
+    const total = (this.db.prepare('SELECT COUNT(*) AS count FROM location_update_requests WHERE workspace_id = ? AND status = ?').get(workspaceId, status) as { count: number }).count;
+    return { items: rows.map(mapLocationUpdateRequest), total };
+  }
+
+  resolveLocationUpdateRequest(
+    workspaceId: string,
+    actorUserId: string,
+    id: string,
+    status: Extract<LocationUpdateRequest['status'], 'resolved' | 'dismissed'>,
+    requestId?: string,
+  ): LocationUpdateRequest | undefined {
+    const current = this.getLocationUpdateRequest(workspaceId, id);
+    if (!current || current.status !== 'pending') return undefined;
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      this.db.prepare("UPDATE location_update_requests SET status = ?, resolved_by = ?, resolved_at = ? WHERE workspace_id = ? AND id = ? AND status = 'pending'")
+        .run(status, actorUserId, now, workspaceId, id);
+      if (current.locationId) {
+        this.recordResidentLocationEvent({
+          workspaceId,
+          locationId: current.locationId,
+          action: `location.request_${status}`,
+          actorType: 'operator',
+          requestId,
+          before: { requestId: id, status: current.status },
+          after: { requestId: id, status },
+        });
+      }
+      this.audit({ workspaceId, actorUserId, action: `resident_request.${status}`, resourceType: 'location_update_request', resourceId: id, requestId, details: { locationId: current.locationId } });
+    })();
+    return this.getLocationUpdateRequest(workspaceId, id);
+  }
+
+  resolvePublicWorkspaceId(preferredWorkspaceId?: string): string | undefined {
+    if (preferredWorkspaceId) {
+      return (this.db.prepare('SELECT id FROM workspaces WHERE id = ?').get(preferredWorkspaceId) as { id: string } | undefined)?.id;
+    }
+    const workspaces = this.db.prepare('SELECT id FROM workspaces ORDER BY created_at, id LIMIT 2').all() as Array<{ id: string }>;
+    return workspaces.length === 1 ? workspaces[0].id : undefined;
+  }
+
+  createCaretakerLink(workspaceId: string, actorUserId: string, locationId: string, expiresInDays = 180, requestId?: string): CaretakerLink | undefined {
+    if (!this.getResidentLocation(workspaceId, locationId)) return undefined;
+    const boundedDays = Math.min(365, Math.max(1, Math.floor(expiresInDays)));
+    const id = randomUUID();
+    const token = randomBytes(32).toString('base64url');
+    const tokenHash = createHash('sha256').update(token).digest('hex');
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + boundedDays * 86_400_000).toISOString();
+    this.db.transaction(() => {
+      this.db.prepare('UPDATE caretaker_tokens SET revoked_at = COALESCE(revoked_at, ?) WHERE workspace_id = ? AND location_id = ? AND revoked_at IS NULL')
+        .run(now.toISOString(), workspaceId, locationId);
+      this.db.prepare('INSERT INTO caretaker_tokens (id, workspace_id, location_id, token_hash, expires_at, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(id, workspaceId, locationId, tokenHash, expiresAt, actorUserId, now.toISOString());
+      this.recordResidentLocationEvent({ workspaceId, locationId, action: 'location.caretaker_link_created', actorType: 'operator', requestId, before: {}, after: { expiresAt } });
+      this.audit({ workspaceId, actorUserId, action: 'resident_location.caretaker_link_created', resourceType: 'resident_location', resourceId: locationId, requestId, details: { expiresAt } });
+    })();
+    return { id, locationId, token, expiresAt };
+  }
+
+  listCaretakerLinks(workspaceId: string, locationId: string): CaretakerLinkRecord[] {
+    return (this.db.prepare(`
+      SELECT id, location_id, expires_at, created_at, last_used_at, revoked_at
+      FROM caretaker_tokens
+      WHERE workspace_id = ? AND location_id = ?
+      ORDER BY created_at DESC, id DESC
+    `).all(workspaceId, locationId) as any[]).map((row) => ({
+      id: row.id,
+      locationId: row.location_id,
+      expiresAt: row.expires_at,
+      createdAt: row.created_at,
+      lastUsedAt: row.last_used_at ?? undefined,
+      revokedAt: row.revoked_at ?? undefined,
+    }));
+  }
+
+  getCaretakerLocation(token: string): ResidentLocation | undefined {
+    const row = this.getActiveCaretakerToken(token);
+    return row ? this.getResidentLocation(row.workspace_id, row.location_id) : undefined;
+  }
+
+  applyCaretakerUpdate(token: string, input: CaretakerUpdateInput, verified: VerifiedAddress, requestId?: string): ResidentLocation | undefined {
+    const tokenRow = this.getActiveCaretakerToken(token);
+    if (!tokenRow) return undefined;
+    return this.db.transaction(() => {
+      const current = this.getResidentLocation(tokenRow.workspace_id, tokenRow.location_id);
+      if (!current) return undefined;
+      const now = new Date().toISOString();
+      const nextAddressKey = residentAddressKey(verified);
+      const duplicate = this.db.prepare('SELECT id FROM resident_locations WHERE workspace_id = ? AND address_key = ? AND id <> ?')
+        .get(tokenRow.workspace_id, nextAddressKey, current.id) as { id: string } | undefined;
+      if (duplicate) throw new Error('This exact address already belongs to another resident location.');
+      this.db.prepare(`
+        UPDATE resident_locations SET title = ?, address_key = ?, address_line = ?, postal_code = ?, city = ?, municipality = ?, province = ?,
+          latitude = ?, longitude = ?, status = ?, publication_status = ?, categories_json = ?, address_verified_at = ?, last_verified_at = ?, updated_at = ?
+        WHERE workspace_id = ? AND id = ?
+      `).run(
+        input.title ?? current.title, nextAddressKey, verified.addressLine, verified.postalCode, verified.city, verified.municipality ?? null, verified.province ?? null,
+        verified.latitude, verified.longitude, input.status, input.status === 'active' ? 'published' : 'review', JSON.stringify(input.categories),
+        verified.verifiedAt, verified.verifiedAt, now, tokenRow.workspace_id, current.id,
+      );
+      this.db.prepare('UPDATE caretaker_tokens SET last_used_at = ? WHERE id = ?').run(now, tokenRow.id);
+      const location = this.getResidentLocation(tokenRow.workspace_id, current.id)!;
+      this.recordResidentLocationEvent({ workspaceId: tokenRow.workspace_id, locationId: current.id, action: 'location.caretaker_updated', actorType: 'caretaker', requestId, before: this.residentSnapshot(current), after: this.residentSnapshot(location) });
+      this.audit({ workspaceId: tokenRow.workspace_id, action: 'resident_location.caretaker_updated', resourceType: 'resident_location', resourceId: current.id, requestId, details: { status: input.status } });
+      return location;
+    })();
+  }
+
+  revokeCaretakerLink(workspaceId: string, actorUserId: string, id: string, requestId?: string): boolean {
+    const row = this.db.prepare('SELECT location_id FROM caretaker_tokens WHERE workspace_id = ? AND id = ? AND revoked_at IS NULL').get(workspaceId, id) as { location_id: string } | undefined;
+    if (!row) return false;
+    const now = new Date().toISOString();
+    this.db.prepare('UPDATE caretaker_tokens SET revoked_at = ? WHERE workspace_id = ? AND id = ? AND revoked_at IS NULL').run(now, workspaceId, id);
+    this.recordResidentLocationEvent({ workspaceId, locationId: row.location_id, action: 'location.caretaker_link_revoked', actorType: 'operator', requestId, before: {}, after: {} });
+    this.audit({ workspaceId, actorUserId, action: 'resident_location.caretaker_link_revoked', resourceType: 'resident_location', resourceId: row.location_id, requestId });
+    return true;
+  }
+
   dashboard(workspaceId: string): Record<string, unknown> {
     const counts = this.db.prepare('SELECT status, COUNT(*) AS count FROM exchange_items WHERE workspace_id = ? GROUP BY status').all(workspaceId) as Array<{ status: string; count: number }>;
     const attention = this.listItems(workspaceId, {
@@ -670,6 +1216,51 @@ export class AppDatabase {
 
   workspaceSafetyStop(workspaceId: string): boolean {
     return (this.db.prepare('SELECT safety_stop FROM workspaces WHERE id = ?').get(workspaceId) as { safety_stop: number } | undefined)?.safety_stop === 1;
+  }
+
+  private recordResidentLocationEvent(input: {
+    workspaceId: string;
+    locationId: string;
+    action: string;
+    actorType: ResidentLocationEvent['actorType'];
+    sourceRegistryId?: string;
+    requestId?: string;
+    before: Record<string, unknown>;
+    after: Record<string, unknown>;
+  }): void {
+    this.db.prepare(`
+      INSERT INTO resident_location_events (
+        id, workspace_id, location_id, action, actor_type, source_registry_id, request_id, before_json, after_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      randomUUID(), input.workspaceId, input.locationId, input.action, input.actorType,
+      input.sourceRegistryId ?? null, input.requestId ?? null, JSON.stringify(input.before), JSON.stringify(input.after), new Date().toISOString(),
+    );
+  }
+
+  private residentSnapshot(location: ResidentLocation): Record<string, unknown> {
+    return {
+      title: location.title,
+      addressLine: location.addressLine,
+      postalCode: location.postalCode,
+      city: location.city,
+      municipality: location.municipality,
+      province: location.province,
+      latitude: location.latitude,
+      longitude: location.longitude,
+      status: location.status,
+      publicationStatus: location.publicationStatus,
+      categories: location.categories,
+      lastVerifiedAt: location.lastVerifiedAt,
+    };
+  }
+
+  private getActiveCaretakerToken(token: string): { id: string; workspace_id: string; location_id: string } | undefined {
+    const hash = createHash('sha256').update(token).digest('hex');
+    return this.db.prepare(`
+      SELECT id, workspace_id, location_id FROM caretaker_tokens
+      WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > ?
+    `).get(hash, new Date().toISOString()) as { id: string; workspace_id: string; location_id: string } | undefined;
   }
 
   private getJob(id: string): JobRecord | undefined {

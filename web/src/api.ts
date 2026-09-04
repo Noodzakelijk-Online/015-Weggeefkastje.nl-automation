@@ -36,6 +36,33 @@ export interface ItemDetail {
   availableActions: string[];
 }
 
+export interface PublicLocation {
+  id: string;
+  title: string;
+  addressLine: string;
+  postalCode: string;
+  city: string;
+  municipality?: string;
+  province?: string;
+  latitude: number;
+  longitude: number;
+  categories: string[];
+  lastVerifiedAt: string;
+  directionsUrl: string;
+}
+
+export interface PublicLocationList {
+  items: PublicLocation[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
+export interface PublicAttribution {
+  name: string;
+  attribution: string;
+}
+
 interface ApiResponse<T> { data: T; meta?: Record<string, number> }
 export interface ApiEnvelope<T> { data: T; meta?: Record<string, number> }
 

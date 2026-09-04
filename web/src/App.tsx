@@ -5,6 +5,8 @@ import {
   Sparkles, X,
 } from 'lucide-react';
 import { api, type Item, type ItemDetail, type Session } from './api';
+import { ResidentCatalogView } from './admin/ResidentCatalogView';
+import { SourceRegistryView } from './admin/SourceRegistryView';
 
 const statusLabels: Record<string, string> = {
   draft: 'Concept', rules_review: 'Regels controleren', human_review: 'Beoordelen',
@@ -19,7 +21,7 @@ const actionLabels: Record<string, string> = {
   schedule_pickup: 'Afspraak plannen', complete_pickup: 'Markeer als opgehaald', cancel: 'Annuleren', archive: 'Archiveren',
 };
 
-type View = 'overview' | 'intake' | 'review' | 'publish' | 'coordinate' | 'archive' | 'settings';
+type View = 'overview' | 'intake' | 'review' | 'publish' | 'coordinate' | 'archive' | 'locations' | 'sources' | 'settings';
 
 const viewStatuses: Partial<Record<View, string[]>> = {
   overview: ['rules_review', 'human_review', 'ready_to_post', 'responding', 'pickup_scheduled'],
@@ -166,7 +168,7 @@ export function App() {
       if (search.trim()) query.set('query', search.trim());
       const [dashboard, itemEnvelope, reviewSummary] = await Promise.all([
         api.request<{ counts: Record<string, number> }>('/api/dashboard'),
-        view === 'settings' ? Promise.resolve({ data: [] as Item[], meta: { total: 0 } }) : api.requestEnvelope<Item[]>(`/api/items?${query}`),
+        ['settings', 'locations', 'sources'].includes(view) ? Promise.resolve({ data: [] as Item[], meta: { total: 0 } }) : api.requestEnvelope<Item[]>(`/api/items?${query}`),
         api.request<{ ambiguousMentions: number }>('/api/review/summary'),
       ]);
       setCounts(dashboard.counts); setItems(itemEnvelope.data); setTotal(itemEnvelope.meta?.total ?? itemEnvelope.data.length);
@@ -200,9 +202,10 @@ export function App() {
 
   const nav = [
     ['overview','Overzicht',Home], ['intake','Intake',Inbox], ['review','Beoordelen',Sparkles], ['publish','Publiceren',PackageCheck],
-    ['coordinate','Coördinatie',MessageCircle], ['archive','Archief',Archive], ['settings','Instellingen',Settings],
+    ['coordinate','Coördinatie',MessageCircle], ['archive','Archief',Archive], ['locations','Kastjes',Home], ['sources','Bronnen',ShieldAlert], ['settings','Instellingen',Settings],
   ] as const;
   const heading = view === 'overview' ? 'Wat heeft aandacht nodig?' : nav.find(([key]) => key === view)?.[1];
+  const catalogManagementView = view === 'locations' || view === 'sources';
   return <div className="app-shell">
     <aside className={`sidebar ${menu ? 'open' : ''}`}>
       <div className="brand"><div className="brand-mark"><HeartHandshake /></div><div><strong>Weggeefkastje</strong><span>Automatisering</span></div></div>
@@ -210,13 +213,15 @@ export function App() {
       <div className="sidebar-profile"><div className="avatar">{session.displayName.slice(0,2).toUpperCase()}</div><div><strong>{session.displayName}</strong><span>{session.role}</span></div><button className="icon-button light" onClick={logout} aria-label="Uitloggen"><LogOut /></button></div>
     </aside>
     <main className="workspace">
-      <header className="topbar"><button className="icon-button menu-button" onClick={() => setMenu(!menu)} aria-label="Menu"><Menu /></button><div className="search"><Search /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Zoek op titel, plaats of categorie" aria-label="Zoeken" /></div><button className="icon-button notification" onClick={() => setView('review')} aria-label="Meldingen en beoordelingen"><Bell />{reviewCount > 0 && <i />}</button><button className="primary new-button" onClick={() => setIntake(true)}><FilePlus2 />Nieuwe intake</button></header>
+      <header className="topbar"><button className="icon-button menu-button" onClick={() => setMenu(!menu)} aria-label="Menu"><Menu /></button>{catalogManagementView ? <div className="topbar-context">Bewonersvinder beheren</div> : <div className="search"><Search /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Zoek op titel, plaats of categorie" aria-label="Zoeken" /></div>}<button className="icon-button notification" onClick={() => setView('review')} aria-label="Meldingen en beoordelingen"><Bell />{reviewCount > 0 && <i />}</button>{!catalogManagementView && <button className="primary new-button" onClick={() => setIntake(true)}><FilePlus2 />Nieuwe intake</button>}</header>
       <section className="content">
         <div className="page-heading"><div><p className="eyebrow">{session.workspaceName.toUpperCase()}</p><h1>{heading}</h1><p className="muted">{view === 'overview' ? 'Werk de belangrijkste stappen af en houd de overdracht persoonlijk.' : 'Alle gegevens blijven onder menselijke controle.'}</p></div></div>
-        <div className="manual-alert"><ShieldAlert /><div><strong>Plaatsen gebeurt handmatig — er wordt niets automatisch gepubliceerd.</strong><span>Controleer ieder bericht, kopieer het pakket en plaats het zelf op het gekozen platform.</span></div></div>
+        <div className="manual-alert"><ShieldAlert /><div><strong>Externe berichten worden handmatig geplaatst.</strong><span>Een expliciet toegestane bron mag alleen een kastje automatisch zichtbaar maken na een exacte adrescontrole; andere bronnen blijven in beoordeling.</span></div></div>
         {error && <p className="form-error page-error" role="alert">{error}<button onClick={() => setError('')}><X /></button></p>}
         {view === 'overview' && <div className="stats"><article><span>Te beoordelen</span><strong>{(counts.rules_review ?? 0) + (counts.human_review ?? 0)}</strong><small>controle nodig</small></article><article><span>Klaar om te plaatsen</span><strong>{counts.ready_to_post ?? 0}</strong><small>handmatige stap</small></article><article><span>Coördinatie</span><strong>{(counts.responding ?? 0) + (counts.pickup_scheduled ?? 0)}</strong><small>reacties en afspraken</small></article></div>}
-        {view === 'settings' ? <section className="settings-panel"><h2>Werkruimte-instellingen</h2>{settings ? <><dl className="settings-list">{Object.entries(settings).filter(([key]) => !['featureFlags','safetyStop'].includes(key)).map(([key,value]) => <div key={key}><dt>{key}</dt><dd>{String(value ?? '—')}</dd></div>)}</dl>{session.role === 'owner' && <div className="safety-control"><div><strong>Veiligheidsstop</strong><p>Blokkeert providerintake door de worker. Handmatige gegevens blijven beschikbaar.</p></div><button className={settings.safetyStop ? 'primary' : 'secondary'} onClick={toggleSafetyStop}>{settings.safetyStop ? 'Veiligheidsstop uitschakelen' : 'Veiligheidsstop inschakelen'}</button></div>}</> : <LoaderCircle className="spin" />}<p className="safety-note"><ShieldAlert /> Providerverbindingen worden alleen via serverconfiguratie geactiveerd; geheimen worden nooit in deze pagina getoond.</p></section>
+        {view === 'locations' ? <ResidentCatalogView />
+        : view === 'sources' ? <SourceRegistryView />
+        : view === 'settings' ? <section className="settings-panel"><h2>Werkruimte-instellingen</h2>{settings ? <><dl className="settings-list">{Object.entries(settings).filter(([key]) => !['featureFlags','safetyStop'].includes(key)).map(([key,value]) => <div key={key}><dt>{key}</dt><dd>{String(value ?? '—')}</dd></div>)}</dl>{session.role === 'owner' && <div className="safety-control"><div><strong>Veiligheidsstop</strong><p>Blokkeert providerintake door de worker. Handmatige gegevens blijven beschikbaar.</p></div><button className={settings.safetyStop ? 'primary' : 'secondary'} onClick={toggleSafetyStop}>{settings.safetyStop ? 'Veiligheidsstop uitschakelen' : 'Veiligheidsstop inschakelen'}</button></div>}</> : <LoaderCircle className="spin" />}<p className="safety-note"><ShieldAlert /> Providerverbindingen worden alleen via serverconfiguratie geactiveerd; geheimen worden nooit in deze pagina getoond.</p></section>
         : <section className="queue-card"><div className="queue-header"><div><h2>{view === 'overview' ? 'Actieve werkstroom' : heading}</h2><span>{total} resultaten</span></div><button className="text-button" onClick={refresh}>Vernieuwen</button></div>
           {view === 'review' && mentions.length > 0 && <div className="mention-list">{mentions.map((mention) => <article key={mention.id}><div><span className="status status-rules_review">Locatie ontbreekt</span><h3>{mention.sourceName}</h3><p>{mention.summary}</p><small>{mention.platform} · {new Intl.DateTimeFormat('nl-NL').format(new Date(mention.observedAt))}</small></div><div>{mention.sourceLink && <a className="secondary" href={mention.sourceLink} target="_blank" rel="noreferrer">Bron bekijken</a>}<button className="text-button" onClick={() => dismissMention(mention.id)}>Niet bruikbaar</button></div></article>)}</div>}
           <div className="item-list" role="table" aria-label="Werkstroom"><div className="list-head" role="row"><span>Vermelding</span><span>Fase</span><span>Locatie</span><span>Bijgewerkt</span><span /></div>

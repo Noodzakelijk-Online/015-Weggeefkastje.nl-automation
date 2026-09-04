@@ -323,6 +323,135 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 5,
+    name: 'resident_locator_catalog_and_source_governance',
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS source_registry (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          source_key TEXT NOT NULL,
+          name TEXT NOT NULL,
+          access_mode TEXT NOT NULL CHECK(access_mode IN ('official_api', 'approved_export', 'open_data', 'owner_authorized', 'manual')),
+          authorization_reference TEXT NOT NULL,
+          attribution TEXT NOT NULL,
+          publication_mode TEXT NOT NULL CHECK(publication_mode IN ('automatic', 'review')) DEFAULT 'review',
+          enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)) DEFAULT 0,
+          allows_exact_address INTEGER NOT NULL CHECK(allows_exact_address IN (0, 1)) DEFAULT 0,
+          last_checked_at TEXT,
+          last_status TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(workspace_id, source_key),
+          FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS resident_locations (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          address_key TEXT NOT NULL,
+          title TEXT NOT NULL,
+          address_line TEXT NOT NULL,
+          postal_code TEXT NOT NULL,
+          city TEXT NOT NULL,
+          municipality TEXT,
+          province TEXT,
+          latitude REAL NOT NULL,
+          longitude REAL NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('active', 'inactive', 'removed')),
+          publication_status TEXT NOT NULL CHECK(publication_status IN ('published', 'review')),
+          categories_json TEXT NOT NULL DEFAULT '[]',
+          address_verified_at TEXT NOT NULL,
+          last_verified_at TEXT NOT NULL,
+          last_observed_at TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(workspace_id, address_key),
+          FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS resident_location_evidence (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          location_id TEXT NOT NULL,
+          source_registry_id TEXT NOT NULL,
+          source_record_id TEXT,
+          source_link TEXT,
+          summary TEXT NOT NULL,
+          observed_at TEXT NOT NULL,
+          evidence_hash TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          UNIQUE(workspace_id, evidence_hash),
+          FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+          FOREIGN KEY(location_id) REFERENCES resident_locations(id) ON DELETE CASCADE,
+          FOREIGN KEY(source_registry_id) REFERENCES source_registry(id) ON DELETE RESTRICT
+        );
+
+        CREATE TABLE IF NOT EXISTS resident_location_events (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          location_id TEXT NOT NULL,
+          action TEXT NOT NULL,
+          actor_type TEXT NOT NULL CHECK(actor_type IN ('system', 'operator', 'caretaker', 'public')),
+          source_registry_id TEXT,
+          request_id TEXT,
+          before_json TEXT NOT NULL DEFAULT '{}',
+          after_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+          FOREIGN KEY(location_id) REFERENCES resident_locations(id) ON DELETE CASCADE,
+          FOREIGN KEY(source_registry_id) REFERENCES source_registry(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS location_update_requests (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          location_id TEXT,
+          source_registry_id TEXT,
+          request_type TEXT NOT NULL CHECK(request_type IN ('candidate', 'public_report', 'source_review')),
+          status TEXT NOT NULL CHECK(status IN ('pending', 'resolved', 'dismissed')) DEFAULT 'pending',
+          reason TEXT NOT NULL,
+          candidate_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          resolved_at TEXT,
+          FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+          FOREIGN KEY(location_id) REFERENCES resident_locations(id) ON DELETE SET NULL,
+          FOREIGN KEY(source_registry_id) REFERENCES source_registry(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS caretaker_tokens (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          location_id TEXT NOT NULL,
+          token_hash TEXT NOT NULL UNIQUE,
+          expires_at TEXT NOT NULL,
+          revoked_at TEXT,
+          last_used_at TEXT,
+          created_by TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+          FOREIGN KEY(location_id) REFERENCES resident_locations(id) ON DELETE CASCADE,
+          FOREIGN KEY(created_by) REFERENCES users(id) ON DELETE RESTRICT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_sources_workspace_key ON source_registry(workspace_id, source_key);
+        CREATE INDEX IF NOT EXISTS idx_resident_locations_public ON resident_locations(workspace_id, publication_status, status, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_resident_locations_search ON resident_locations(workspace_id, city, postal_code, address_line);
+        CREATE INDEX IF NOT EXISTS idx_resident_evidence_location ON resident_location_evidence(workspace_id, location_id, observed_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_resident_events_location ON resident_location_events(workspace_id, location_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_location_requests_pending ON location_update_requests(workspace_id, status, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_caretaker_tokens_location ON caretaker_tokens(workspace_id, location_id, expires_at);
+      `);
+    },
+  },
+  {
+    version: 6,
+    name: 'resident_location_request_resolution_actor',
+    up(db) {
+      db.exec('ALTER TABLE location_update_requests ADD COLUMN resolved_by TEXT;');
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): { applied: number[]; currentVersion: number } {
